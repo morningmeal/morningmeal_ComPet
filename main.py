@@ -1,0 +1,167 @@
+# main.py
+import sys
+import uuid
+import traceback
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PyQt6.QtGui import QIcon, QFont
+from core.i18n import I18n
+from core.config_manager import config_mgr, CRASH_LOG_PATH
+from core.sound_manager import sound_mgr
+from core.input_listener import input_bridge, start_global_listener
+from ui.settings_window import SettingsWindow
+from ui.pet_widget import PetWidget
+
+def set_mac_dock_policy(hide):
+    if sys.platform != 'darwin': 
+        return
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular
+        app = NSApplication.sharedApplication()
+        if hide:
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        else:
+            app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    except ImportError:
+        pass
+
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    err_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    try:
+        with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(err_msg + "\n")
+        msg = QMessageBox()
+        msg.setWindowTitle(I18n.tr("critical_error"))
+        msg.setText(I18n.tr("crash_msg"))
+        msg.setDetailedText(err_msg)
+        msg.exec()
+    except:
+        pass
+    sys.exit(1)
+
+sys.excepthook = global_exception_handler
+
+class AppController:
+    def __init__(self):
+        sound_mgr.ensure_initialized()
+
+        self.active_pets = []
+        self.settings_win = SettingsWindow()
+        self.settings_win.settings_changed.connect(self.reload_all_pets)
+        
+        self.tray_icon = QSystemTrayIcon(QIcon("assets/icons/app_icon.png"), QApplication.instance())
+        self.setup_tray_menu()
+        self.tray_icon.show()
+
+        I18n.language_changed.connect(self.setup_tray_menu)
+        input_bridge.key_pressed.connect(self.route_input)
+        
+        if sys.platform == 'darwin' and not config_mgr.settings.get("mac_permission_shown", False):
+            QMessageBox.information(None, I18n.tr("mac_permission_title"), I18n.tr("mac_permission_msg"))
+            config_mgr.settings["mac_permission_shown"] = True
+            config_mgr.save_global_settings()
+
+        self.reload_all_pets()
+        self.settings_win.show()
+
+    def setup_tray_menu(self):
+        self.tray_menu = QMenu()
+        
+        show_action = self.tray_menu.addAction(I18n.tr("tray_show"))
+        show_action.triggered.connect(self.settings_win.show)
+        self.tray_menu.addSeparator()
+        
+        self.lock_action = self.tray_menu.addAction(I18n.tr("lock_position"))
+        self.lock_action.setCheckable(True)
+        self.lock_action.setChecked(config_mgr.settings.get("lock_position", False))
+        self.lock_action.triggered.connect(self.toggle_lock)
+
+        self.click_action = self.tray_menu.addAction(I18n.tr("click_through"))
+        self.click_action.setCheckable(True)
+        self.click_action.setChecked(config_mgr.settings.get("click_through", False))
+        self.click_action.triggered.connect(self.toggle_click_through)
+        
+        self.tray_menu.addSeparator()
+        exit_action = self.tray_menu.addAction(I18n.tr("tray_exit"))
+        exit_action.triggered.connect(QApplication.instance().quit)
+        
+        self.tray_icon.setContextMenu(self.tray_menu)
+
+    def toggle_lock(self, checked):
+        config_mgr.settings["lock_position"] = checked
+        config_mgr.save_global_settings()
+
+    def toggle_click_through(self, checked):
+        config_mgr.settings["click_through"] = checked
+        config_mgr.save_global_settings()
+        
+        self.settings_win.click_through_cb.blockSignals(True)
+        self.settings_win.click_through_cb.setChecked(checked)
+        self.settings_win.click_through_cb.blockSignals(False)
+        
+        for pet in self.active_pets:
+            pet.update_window_flags()
+
+    def duplicate_pet_instance(self, source_data):
+        new_pet_data = {
+            "id": str(uuid.uuid4()),
+            "skin": source_data.get("skin", "default"),
+            "scale": float(source_data.get("scale", 1.0)),
+            "x": int(source_data.get("x", 100)) + 30,
+            "y": int(source_data.get("y", 100)) + 30
+        }
+        config_mgr.settings["instances"].append(new_pet_data)
+        config_mgr.save_global_settings()
+        
+        self.settings_win.refresh_pet_list()
+        self.reload_all_pets()
+
+    def reload_all_pets(self):
+        for p in self.active_pets:
+            p.close()
+            p.deleteLater()
+        self.active_pets.clear()
+
+        set_mac_dock_policy(config_mgr.settings.get("tray_mode", False))
+        sound_mgr.load_sounds()
+
+        for inst_data in config_mgr.settings["instances"]:
+            pet = PetWidget(
+                inst_data, 
+                open_settings_callback=self.settings_win.show,
+                duplicate_callback=self.duplicate_pet_instance
+            )
+            # 펫 휠 조작 시 설정창 카드 크기 UI 동기화 연결
+            pet.scale_changed.connect(self.settings_win.update_pet_card_scale)
+            self.active_pets.append(pet)
+
+        self.lock_action.setChecked(config_mgr.settings.get("lock_position", False))
+        self.click_action.setChecked(config_mgr.settings.get("click_through", False))
+
+    def route_input(self, key_name):
+        if key_name.startswith("mouse_"):
+            sound_mgr.play_click()
+        else:
+            sound_mgr.play_key()
+        
+        for pet in self.active_pets:
+            pet.trigger_bounce(key_name)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
+    # 폰트 포인트 크기 명시적 지정 (PointSize <= 0 경고 완벽 차단)
+    font = app.font()
+    font.setPointSize(10)
+    app.setFont(font)
+
+    saved_lang = config_mgr.settings.get("language", "auto")
+    if saved_lang == "auto":
+        I18n.detect_os_language()
+    else:
+        I18n.set_language(saved_lang)
+
+    start_global_listener()
+    controller = AppController()
+    sys.exit(app.exec())

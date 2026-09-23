@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# PyInstaller 빌드 산출물
+build/
+dist/
+*.spec
+
+# 런타임 생성 설정 및 로그 (사용자 개인 데이터)
+settings.json
+crash_log.txt
+*.log
+
+# OS 메타데이터
+.DS_Store
+Thumbs.db
