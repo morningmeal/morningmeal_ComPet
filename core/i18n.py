@@ -35,7 +35,8 @@ TRANSLATIONS = {
         "col_input": "감지 입력값", "col_image": "출력 이미지 파일", "col_browse": "파일 탐색",
         "input_waiting": "입력 대기", "input_detecting": "입력 감지 중...",
         "create_skin_prompt": "생성할 스킨의 영문 이름을 입력하세요:",
-        "skin_exists_warn": "이미 존재하는 스킨 이름입니다.", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+        "skin_exists_warn": "이미 존재하는 스킨 이름입니다.", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)",
+        "remove_pet": "펫 삭제"
     },
     "en": {
         "settings_title": "morningmeal_Compet - Settings", "tab_general": "⚙️ General", "tab_sound": "🎵 Sound", "tab_pets": "🐾 Pets", "tab_skin": "🎨 Skin Editor",
@@ -70,7 +71,8 @@ TRANSLATIONS = {
         "col_input": "Input Key", "col_image": "Image File", "col_browse": "Browse",
         "input_waiting": "Wait for Input", "input_detecting": "Press any key...",
         "create_skin_prompt": "Enter new skin name (English recommended):",
-        "skin_exists_warn": "A skin with that name already exists.", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+        "skin_exists_warn": "A skin with that name already exists.", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)",
+        "remove_pet": "Remove Pet"
     },
     "ja": {
         "settings_title": "morningmeal_Compet - 設定", "tab_general": "⚙️ 一般", "tab_sound": "🎵 サウンド", "tab_pets": "🐾 ペット管理", "tab_skin": "🎨 スキン編集",
@@ -105,7 +107,8 @@ TRANSLATIONS = {
         "col_input": "入力キー", "col_image": "画像ファイル", "col_browse": "参照",
         "input_waiting": "入力待機", "input_detecting": "キー入力待ち...",
         "create_skin_prompt": "新しいスキン名を入力してください:",
-        "skin_exists_warn": "同名のスキンが既に存在します。", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+        "skin_exists_warn": "同名のスキンが既に存在します。", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)",
+        "remove_pet": "ペットを削除"
     },
     "zh_CN": {
         "settings_title": "morningmeal_Compet - 设置", "tab_general": "⚙️ 常规", "tab_sound": "🎵 声音", "tab_pets": "🐾 宠物管理", "tab_skin": "🎨 皮肤编辑",
@@ -140,7 +143,8 @@ TRANSLATIONS = {
         "col_input": "输入按键", "col_image": "图片文件", "col_browse": "浏览",
         "input_waiting": "等待输入", "input_detecting": "正在检测输入...",
         "create_skin_prompt": "请输入新皮肤名称:",
-        "skin_exists_warn": "该名称的皮肤已存在。", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+        "skin_exists_warn": "该名称的皮肤已存在。", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)",
+        "remove_pet": "删除宠物"
     },
     "zh_TW": {
         "settings_title": "morningmeal_Compet - 設定", "tab_general": "⚙️ 常規", "tab_sound": "🎵 聲音", "tab_pets": "🐾 寵物管理", "tab_skin": "🎨 皮膚編輯",
@@ -175,7 +179,8 @@ TRANSLATIONS = {
         "col_input": "輸入按鍵", "col_image": "圖片檔案", "col_browse": "瀏覽",
         "input_waiting": "等待輸入", "input_detecting": "正在檢測輸入...",
         "create_skin_prompt": "請輸入新皮膚名稱:",
-        "skin_exists_warn": "該名稱的皮膚已存在。", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+        "skin_exists_warn": "該名稱的皮膚已存在。", "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)",
+        "remove_pet": "刪除寵物"
     }
 }
 

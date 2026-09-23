@@ -49,7 +49,6 @@ class AppController:
         self.settings_win = SettingsWindow()
         self.settings_win.settings_changed.connect(self.reload_all_pets)
         
-        # BUNDLE_DIR을 활용한 트레이 아이콘 경로 탐색
         icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
         if os.path.exists(icon_path):
             self.tray_icon = QSystemTrayIcon(QIcon(icon_path), QApplication.instance())
@@ -122,6 +121,20 @@ class AppController:
         self.settings_win.refresh_pet_list()
         self.reload_all_pets()
 
+    def remove_pet_instance(self, target_id):
+        """특정 펫 인스턴스 삭제 (2개 이상일 때만 동작)"""
+        instances = config_mgr.settings.get("instances", [])
+        if len(instances) <= 1:
+            return
+
+        config_mgr.settings["instances"] = [
+            inst for inst in instances if inst.get("id") != target_id
+        ]
+        config_mgr.save_global_settings()
+
+        self.settings_win.refresh_pet_list()
+        self.reload_all_pets()
+
     def reload_all_pets(self):
         for p in self.active_pets:
             p.close()
@@ -135,7 +148,9 @@ class AppController:
             pet = PetWidget(
                 inst_data, 
                 open_settings_callback=self.settings_win.show,
-                duplicate_callback=self.duplicate_pet_instance
+                duplicate_callback=self.duplicate_pet_instance,
+                remove_callback=self.remove_pet_instance,
+                get_total_pets_callback=lambda: len(self.active_pets)
             )
             pet.scale_changed.connect(self.settings_win.update_pet_card_scale)
             self.active_pets.append(pet)
@@ -151,7 +166,6 @@ class AppController:
         
         for pet in self.active_pets:
             pet.trigger_bounce(key_name)
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -13,6 +13,7 @@ from core.sound_manager import sound_mgr, scan_sound_files
 from core.i18n import I18n
 
 class KeyCaptureButton(QPushButton):
+    """단일 키, 조합 키(Shift+1 등), 기호(!, ? 등), 마우스 입력을 정밀 캡처하는 버튼"""
     keyCaptured = pyqtSignal(str)
 
     def __init__(self, text="", parent=None):
@@ -54,13 +55,21 @@ class KeyCaptureButton(QPushButton):
             return
 
         key = event.key()
+        modifiers = event.modifiers()
+
+        # 제어키 단독 입력 중일 때는 대기 유지
+        if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            event.accept()
+            return
+
+        # 1. 텍스트 기호 우선 추출 (!, ?, @ 등)
+        text = event.text().strip()
+
+        # 2. 베이스 키 매핑
         key_map = {
             Qt.Key.Key_Space: "space",
             Qt.Key.Key_Return: "enter",
             Qt.Key.Key_Enter: "enter",
-            Qt.Key.Key_Shift: "shift",
-            Qt.Key.Key_Control: "ctrl",
-            Qt.Key.Key_Alt: "alt",
             Qt.Key.Key_Tab: "tab",
             Qt.Key.Key_Backspace: "backspace",
             Qt.Key.Key_Escape: "esc",
@@ -69,12 +78,24 @@ class KeyCaptureButton(QPushButton):
             Qt.Key.Key_Up: "up",
             Qt.Key.Key_Down: "down"
         }
+        base_name = key_map.get(key, text.lower() if text else f"key_{key}")
 
-        if key in key_map:
-            k_name = key_map[key]
+        # 3. 수정자 키 접두사 구성
+        mod_parts = []
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            mod_parts.append("ctrl")
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            mod_parts.append("alt")
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            mod_parts.append("shift")
+
+        # 4. 최종 등록 키 결정 (기호 자체를 우선시, 필요 시 조합 표기)
+        if text and text in "!@#$%^&*()_+{}|:\"<>?~`":
+            k_name = text
+        elif mod_parts:
+            k_name = "+".join(mod_parts) + "+" + base_name
         else:
-            text = event.text().strip().lower()
-            k_name = text if text else f"key_{key}"
+            k_name = base_name
 
         self.setText(k_name)
         self.capturing = False
@@ -82,6 +103,7 @@ class KeyCaptureButton(QPushButton):
         self.style().unpolish(self)
         self.style().polish(self)
         self.keyCaptured.emit(k_name)
+        event.accept()
 
 
 class PetCardWidget(QFrame):
@@ -276,9 +298,6 @@ class PetCardWidget(QFrame):
 
 
 class SoundControlWidget(QGroupBox):
-    """assets/sounds 내 모든 사운드 파일을 스캔하여 드롭다운으로 선택하는 위젯"""
-    sound_list_updated = pyqtSignal()
-
     def __init__(self, title_key, prefix, parent=None):
         super().__init__(parent)
         self.title_key = title_key
@@ -291,12 +310,10 @@ class SoundControlWidget(QGroupBox):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         
-        # 1. 활성화 체크박스
         self.enable_cb = QCheckBox()
         self.enable_cb.setChecked(config_mgr.settings.get(f"{self.prefix}_sound_enabled", True))
         self.enable_cb.toggled.connect(self.on_enable_changed)
         
-        # 2. 볼륨 슬라이더
         vol_layout = QHBoxLayout()
         self.vol_title = QLabel()
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
@@ -308,7 +325,6 @@ class SoundControlWidget(QGroupBox):
         vol_layout.addWidget(self.vol_slider)
         vol_layout.addWidget(self.vol_label)
         
-        # 3. 사운드 파일 동적 드롭다운
         preset_layout = QHBoxLayout()
         self.preset_title = QLabel()
         self.sound_combo = QComboBox()
@@ -322,14 +338,11 @@ class SoundControlWidget(QGroupBox):
         layout.addLayout(preset_layout)
 
     def populate_sounds(self):
-        """assets/sounds/ 내의 모든 사운드 파일을 스캔하여 드롭다운 채우기"""
         self.sound_combo.blockSignals(True)
         self.sound_combo.clear()
 
-        # 1) 사운드 끄기 (None)
         self.sound_combo.addItem("🔇 " + I18n.tr("using_default_sound"), "")
 
-        # 2) assets/sounds/ 에서 발견된 파일 목록 추가
         scanned = scan_sound_files()
         cur_saved = config_mgr.settings.get(f"{self.prefix}_sound_path", "")
         
@@ -341,7 +354,6 @@ class SoundControlWidget(QGroupBox):
                 selected_index = idx
             idx += 1
 
-        # 3) 외부 파일 추가 옵션
         self.sound_combo.addItem("➕ " + I18n.tr("upload_sound") + "...", "__import__")
 
         self.sound_combo.setCurrentIndex(selected_index)
@@ -367,7 +379,6 @@ class SoundControlWidget(QGroupBox):
     def on_sound_selected(self, index):
         data = self.sound_combo.itemData(index)
 
-        # 사용자가 [외부 파일 가져오기...]를 선택한 경우
         if data == "__import__":
             self.import_sound_file()
             return
@@ -376,8 +387,7 @@ class SoundControlWidget(QGroupBox):
         config_mgr.save_global_settings()
         sound_mgr.load_sounds()
 
-def import_sound_file(self):
-        """외부 WAV 파일을 선택받아 assets/sounds/ 로 자동 복사하고 드롭다운에 등록"""
+    def import_sound_file(self):
         filter_str = "WAV Files (*.wav)"
         path, _ = QFileDialog.getOpenFileName(self, I18n.tr("select_wav"), "", filter_str)
         if not path:
@@ -401,22 +411,6 @@ def import_sound_file(self):
             config_mgr.save_global_settings()
             sound_mgr.load_sounds()
             
-            self.populate_sounds()
-            QMessageBox.information(self, I18n.tr("complete"), f"{dest_filename} {I18n.tr('applied')}")
-        except Exception as e:
-            QMessageBox.critical(self, I18n.tr("error"), f"Import failed:\n{e}")
-            self.populate_sounds()
-
-        try:
-            if os.path.abspath(path) != os.path.abspath(dest_path):
-                shutil.copy2(path, dest_path)
-            
-            # 현재 사운드로 설정
-            config_mgr.settings[f"{self.prefix}_sound_path"] = dest_path
-            config_mgr.save_global_settings()
-            sound_mgr.load_sounds()
-            
-            # 목록 갱신
             self.populate_sounds()
             QMessageBox.information(self, I18n.tr("complete"), f"{dest_filename} {I18n.tr('applied')}")
         except Exception as e:

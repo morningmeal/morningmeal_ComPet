@@ -9,18 +9,20 @@ from core.config_manager import config_mgr, SKINS_DIR
 from core.i18n import I18n
 
 class PetWidget(QWidget):
-    scale_changed = pyqtSignal(str, float)  # (instance_id, scale_val)
+    scale_changed = pyqtSignal(str, float)
 
-    def __init__(self, instance_data, open_settings_callback=None, duplicate_callback=None):
+    def __init__(self, instance_data, open_settings_callback=None, duplicate_callback=None, remove_callback=None, get_total_pets_callback=None):
         super().__init__()
         self.instance_data = instance_data
         self.open_settings_callback = open_settings_callback
         self.duplicate_callback = duplicate_callback
+        self.remove_callback = remove_callback
+        self.get_total_pets_callback = get_total_pets_callback
         self.tap_index = 0
         self.scale_x, self.scale_y = 1.0, 1.0
-        self.squash_depth = 0.20  # 기본 압축 깊이 20%
-        self.stiffness = 0.25     # 물리 복귀 감쇠 계수
-        self.hit_times = deque(maxlen=20)  # APM 계산용 큐
+        self.squash_depth = 0.20
+        self.stiffness = 0.25
+        self.hit_times = deque(maxlen=20)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.update_window_flags()
@@ -57,9 +59,10 @@ class PetWidget(QWidget):
         self.idle_pixmap = QPixmap(os.path.join(s_dir, skin_conf.get("idle_image", "idle.png")))
         self.tap_pixmaps = [QPixmap(os.path.join(s_dir, p)) for p in skin_conf.get("tap_images", ["tap_left.png", "tap_right.png"])]
         
+        # 키 매핑 픽스맵 캐싱 (대소문자 무관 비교를 위해 소문자화)
         self.cached_pixmaps = {}
         for k, v in self.key_mappings.items():
-            self.cached_pixmaps[k] = QPixmap(os.path.join(s_dir, v))
+            self.cached_pixmaps[k.lower()] = QPixmap(os.path.join(s_dir, v))
 
         self.current_pixmap = self.idle_pixmap
         self.update_widget_size()
@@ -79,7 +82,6 @@ class PetWidget(QWidget):
         config_mgr.save_global_settings()
         self.update_widget_size()
         self.update()
-        # 설정창 동기화를 위한 시그널 방출
         self.scale_changed.emit(self.instance_data.get("id", ""), self.display_scale)
 
     def change_skin_direct(self, new_skin):
@@ -101,10 +103,15 @@ class PetWidget(QWidget):
 
     def contextMenuEvent(self, event: QContextMenuEvent):
         menu = QMenu(self)
-        
         settings_action = menu.addAction(I18n.tr("tray_show"))
         duplicate_action = menu.addAction(I18n.tr("duplicate_pet"))
-        
+
+        # 활성화된 펫이 2개 이상일 때만 삭제 옵션 표시
+        remove_action = None
+        total_pets = self.get_total_pets_callback() if self.get_total_pets_callback else len(config_mgr.settings.get("instances", []))
+        if total_pets > 1:
+            remove_action = menu.addAction(I18n.tr("remove_pet"))
+
         menu.addSeparator()
         
         skins_menu = menu.addMenu(I18n.tr("change_skin"))
@@ -129,6 +136,9 @@ class PetWidget(QWidget):
         elif chosen == duplicate_action:
             if self.duplicate_callback:
                 self.duplicate_callback(self.instance_data)
+        elif remove_action and chosen == remove_action:
+            if self.remove_callback:
+                self.remove_callback(self.instance_data.get("id"))
         elif chosen == exit_action:
             QApplication.quit()
 
@@ -141,8 +151,17 @@ class PetWidget(QWidget):
             if dt > 0:
                 apm = (len(self.hit_times) / dt) * 60
 
-        if key_name in self.cached_pixmaps:
-            self.current_pixmap = self.cached_pixmaps[key_name]
+        # 다중 후보 분리 (예: "!|shift+1" -> ["!", "shift+1"])
+        candidates = [c.strip().lower() for c in key_name.split("|")]
+        
+        matched_pixmap = None
+        for cand in candidates:
+            if cand in self.cached_pixmaps and not self.cached_pixmaps[cand].isNull():
+                matched_pixmap = self.cached_pixmaps[cand]
+                break
+
+        if matched_pixmap:
+            self.current_pixmap = matched_pixmap
         elif key_name.startswith("mouse_") and "mouse_click" in self.cached_pixmaps:
             self.current_pixmap = self.cached_pixmaps["mouse_click"]
         else:
