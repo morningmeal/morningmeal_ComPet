@@ -49,9 +49,15 @@ class AppController:
         self.settings_win = SettingsWindow()
         self.settings_win.settings_changed.connect(self.reload_all_pets)
         
-        icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
+        # assets/icon.png 우선 탐색
+        icon_path = os.path.join(BUNDLE_DIR, "assets", "icon.png")
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
+
         if os.path.exists(icon_path):
-            self.tray_icon = QSystemTrayIcon(QIcon(icon_path), QApplication.instance())
+            app_icon = QIcon(icon_path)
+            self.tray_icon = QSystemTrayIcon(app_icon, QApplication.instance())
+            self.settings_win.setWindowIcon(app_icon)
         else:
             self.tray_icon = QSystemTrayIcon(QApplication.instance())
 
@@ -168,8 +174,20 @@ class AppController:
             pet.trigger_bounce(key_name)
 
 if __name__ == "__main__":
+    # Windows 작업 표시줄에서 Python 기본 아이콘 대신 앱 아이콘이 뜨도록 설정
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.morningmeal.compet.desktop")
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    # 전역 윈도우 아이콘 지정
+    icon_path = os.path.join(BUNDLE_DIR, "assets", "icon.png")
+    if not os.path.exists(icon_path):
+        icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     font = app.font()
     font.setPointSize(10)

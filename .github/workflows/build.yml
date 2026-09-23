@@ -1,6 +1,7 @@
 name: Build and Release Compet Desktop Pet
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -16,12 +17,17 @@ jobs:
             artifact_name: Compet-Windows.zip
             run_build: |
               python -m pip install --upgrade pip
-              pip install pyinstaller PyQt6 pynput
+              pip install pyinstaller PyQt6 pynput Pillow
+              
+              # icon.png를 Windows용 app.ico로 자동 변환
+              python -c "from PIL import Image; img = Image.open('assets/icon.png'); img.save('app.ico', format='ICO', sizes=[(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)])"
+              
               pyinstaller --noconfirm --onedir --windowed \
+                --icon "app.ico" \
                 --add-data "assets;assets" \
                 --add-data "skins;skins" \
                 --name "Compet" main.py
-              # dist 폴더 안으로 이동하여 Compet 폴더 전체를 온전하게 압축
+                
               cd dist
               7z a -tzip ../Compet-Windows.zip Compet
               cd ..
@@ -30,11 +36,32 @@ jobs:
             artifact_name: Compet-macOS.zip
             run_build: |
               python -m pip install --upgrade pip
-              pip install pyinstaller PyQt6 pynput pyobjc-framework-Cocoa
+              pip install pyinstaller PyQt6 pynput pyobjc-framework-Cocoa pyobjc-framework-ApplicationServices Pillow
+              
+              # icon.png를 macOS용 icon.icns로 자동 변환
+              mkdir -p icon.iconset
+              sips -z 16 16     assets/icon.png --out icon.iconset/icon_16x16.png
+              sips -z 32 32     assets/icon.png --out icon.iconset/icon_16x16@2x.png
+              sips -z 32 32     assets/icon.png --out icon.iconset/icon_32x32.png
+              sips -z 64 64     assets/icon.png --out icon.iconset/icon_32x32@2x.png
+              sips -z 128 128   assets/icon.png --out icon.iconset/icon_128x128.png
+              sips -z 256 256   assets/icon.png --out icon.iconset/icon_128x128@2x.png
+              sips -z 256 256   assets/icon.png --out icon.iconset/icon_256x256.png
+              sips -z 512 512   assets/icon.png --out icon.iconset/icon_256x256@2x.png
+              sips -z 512 512   assets/icon.png --out icon.iconset/icon_512x512.png
+              sips -z 1024 1024 assets/icon.png --out icon.iconset/icon_512x512@2x.png
+              iconutil -c icns icon.iconset -o app.icns
+              
               pyinstaller --noconfirm --windowed \
+                --icon "app.icns" \
+                --osx-bundle-identifier "com.morningmeal.compet" \
                 --add-data "assets:assets" \
                 --add-data "skins:skins" \
                 --name "Compet" main.py
+                
+              /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string 'Compet needs access to detect keystrokes for pet animations.'" dist/Compet.app/Contents/Info.plist || true
+              /usr/libexec/PlistBuddy -c "Add :NSSystemAdministrationUsageDescription string 'Compet needs accessibility access for global key input listener.'" dist/Compet.app/Contents/Info.plist || true
+
               cd dist
               zip -r -y ../Compet-macOS.zip Compet.app
               cd ..
