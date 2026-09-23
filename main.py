@@ -12,6 +12,18 @@ from core.input_listener import input_bridge, start_global_listener
 from ui.settings_window import SettingsWindow
 from ui.pet_widget import PetWidget
 
+def get_app_icon():
+    """번들 내부의 아이콘 파일을 찾아 QIcon 객체로 반환"""
+    candidates = [
+        os.path.join(BUNDLE_DIR, "assets", "icon.png"),
+        os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png"),
+        os.path.join(BUNDLE_DIR, "assets", "icons", "icon.png")
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return QIcon(p)
+    return QIcon()
+
 def set_mac_dock_policy(hide):
     if sys.platform != 'darwin': 
         return
@@ -45,19 +57,17 @@ class AppController:
     def __init__(self):
         sound_mgr.ensure_initialized()
 
+        self.app_icon = get_app_icon()
         self.active_pets = []
+        
         self.settings_win = SettingsWindow()
+        if not self.app_icon.isNull():
+            self.settings_win.setWindowIcon(self.app_icon)
         self.settings_win.settings_changed.connect(self.reload_all_pets)
         
-        # assets/icon.png 우선 탐색
-        icon_path = os.path.join(BUNDLE_DIR, "assets", "icon.png")
-        if not os.path.exists(icon_path):
-            icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
-
-        if os.path.exists(icon_path):
-            app_icon = QIcon(icon_path)
-            self.tray_icon = QSystemTrayIcon(app_icon, QApplication.instance())
-            self.settings_win.setWindowIcon(app_icon)
+        # 시스템 트레이 아이콘 설정
+        if not self.app_icon.isNull():
+            self.tray_icon = QSystemTrayIcon(self.app_icon, QApplication.instance())
         else:
             self.tray_icon = QSystemTrayIcon(QApplication.instance())
 
@@ -158,6 +168,9 @@ class AppController:
                 remove_callback=self.remove_pet_instance,
                 get_total_pets_callback=lambda: len(self.active_pets)
             )
+            # 펫 윈도우 자체에도 아이콘 지정
+            if not self.app_icon.isNull():
+                pet.setWindowIcon(self.app_icon)
             pet.scale_changed.connect(self.settings_win.update_pet_card_scale)
             self.active_pets.append(pet)
 
@@ -174,20 +187,19 @@ class AppController:
             pet.trigger_bounce(key_name)
 
 if __name__ == "__main__":
-    # Windows 작업 표시줄에서 Python 기본 아이콘 대신 앱 아이콘이 뜨도록 설정
+    # ★ Windows 작업 표시줄에서 Python 기본 아이콘 대신 전용 아이콘이 뜨도록 명시적 ID 부여
     if sys.platform == 'win32':
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.morningmeal.compet.desktop")
+        myappid = 'morningmeal.compet.desktoppet.latest'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    # 전역 윈도우 아이콘 지정
-    icon_path = os.path.join(BUNDLE_DIR, "assets", "icon.png")
-    if not os.path.exists(icon_path):
-        icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    # ★ 앱 전역 기본 아이콘(파비콘) 적용
+    global_icon = get_app_icon()
+    if not global_icon.isNull():
+        app.setWindowIcon(global_icon)
 
     font = app.font()
     font.setPointSize(10)
