@@ -14,17 +14,20 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: Compet-Windows.zip
-            build_script: |
+            run_build: |
+              python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput
-              pyinstaller --noconfirm --onedir --windowed --icon "assets/icons/app_icon.png" --add-data "assets;assets" --add-data "skins;skins" main.py --name "Compet"
-              Compress-Archive -Path dist/Compet/* -DestinationPath Compet-Windows.zip
+              pyinstaller --noconfirm --onedir --windowed --add-data "assets;assets" --add-data "skins;skins" main.py --name "Compet"
+              Compress-Archive -Path "dist/Compet" -DestinationPath "Compet-Windows.zip" -Force
+
           - os: macos-latest
             artifact_name: Compet-macOS.zip
-            build_script: |
+            run_build: |
+              python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput pyobjc-framework-Cocoa
-              pyinstaller --noconfirm --windowed --icon "assets/icons/app_icon.png" --add-data "assets:assets" --add-data "skins:skins" main.py --name "Compet"
+              pyinstaller --noconfirm --windowed --add-data "assets:assets" --add-data "skins:skins" main.py --name "Compet"
               cd dist
-              zip -r ../Compet-macOS.zip Compet.app
+              zip -r -y ../Compet-macOS.zip Compet.app
               cd ..
 
     steps:
@@ -37,8 +40,9 @@ jobs:
           python-version: '3.11'
 
       - name: Build Executable
-        shell: pwsh
-        run: ${{ matrix.build_script }}
+        shell: bash
+        run: |
+          ${{ matrix.run_build }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
