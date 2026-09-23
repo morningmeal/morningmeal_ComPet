@@ -17,7 +17,10 @@ jobs:
             run_build: |
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput
-              pyinstaller --noconfirm --onedir --windowed --add-data "assets;assets" --add-data "skins;skins" main.py --name "Compet"
+              pyinstaller --noconfirm --onedir --windowed \
+                --add-data "assets;assets" \
+                --add-data "skins;skins" \
+                --name "Compet" main.py
               7z a -tzip Compet-Windows.zip ./dist/Compet/*
 
           - os: macos-latest
@@ -25,7 +28,10 @@ jobs:
             run_build: |
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput pyobjc-framework-Cocoa
-              pyinstaller --noconfirm --windowed --add-data "assets:assets" --add-data "skins:skins" main.py --name "Compet"
+              pyinstaller --noconfirm --windowed \
+                --add-data "assets:assets" \
+                --add-data "skins:skins" \
+                --name "Compet" main.py
               cd dist
               zip -r -y ../Compet-macOS.zip Compet.app
               cd ..
