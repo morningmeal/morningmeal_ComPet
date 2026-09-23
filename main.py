@@ -1,16 +1,16 @@
 # main.py
 import sys
+import os
 import uuid
 import traceback
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtGui import QIcon, QFont
 from core.i18n import I18n
-from core.config_manager import config_mgr, CRASH_LOG_PATH
+from core.config_manager import config_mgr, CRASH_LOG_PATH, BUNDLE_DIR
 from core.sound_manager import sound_mgr
 from core.input_listener import input_bridge, start_global_listener
 from ui.settings_window import SettingsWindow
 from ui.pet_widget import PetWidget
-from core.config_manager import config_mgr, CRASH_LOG_PATH, BUNDLE_DIR
 
 def set_mac_dock_policy(hide):
     if sys.platform != 'darwin': 
@@ -43,18 +43,19 @@ sys.excepthook = global_exception_handler
 
 class AppController:
     def __init__(self):
-        icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
-        if os.path.exists(icon_path):
-            self.tray_icon = QSystemTrayIcon(QIcon(icon_path), QApplication.instance())
-        else:  
-            self.tray_icon = QSystemTrayIcon(QApplication.instance())
-            sound_mgr.ensure_initialized()
+        sound_mgr.ensure_initialized()
 
         self.active_pets = []
         self.settings_win = SettingsWindow()
         self.settings_win.settings_changed.connect(self.reload_all_pets)
         
-        self.tray_icon = QSystemTrayIcon(QIcon("assets/icons/app_icon.png"), QApplication.instance())
+        # BUNDLE_DIR을 활용한 트레이 아이콘 경로 탐색
+        icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
+        if os.path.exists(icon_path):
+            self.tray_icon = QSystemTrayIcon(QIcon(icon_path), QApplication.instance())
+        else:
+            self.tray_icon = QSystemTrayIcon(QApplication.instance())
+
         self.setup_tray_menu()
         self.tray_icon.show()
 
@@ -136,7 +137,6 @@ class AppController:
                 open_settings_callback=self.settings_win.show,
                 duplicate_callback=self.duplicate_pet_instance
             )
-            # 펫 휠 조작 시 설정창 카드 크기 UI 동기화 연결
             pet.scale_changed.connect(self.settings_win.update_pet_card_scale)
             self.active_pets.append(pet)
 
@@ -157,7 +157,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    # 폰트 포인트 크기 명시적 지정 (PointSize <= 0 경고 완벽 차단)
     font = app.font()
     font.setPointSize(10)
     app.setFont(font)
