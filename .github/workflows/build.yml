@@ -18,16 +18,12 @@ jobs:
             run_build: |
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput Pillow
-              
-              # icon.png를 Windows용 app.ico로 자동 변환
               python -c "from PIL import Image; img = Image.open('assets/icon.png'); img.save('app.ico', format='ICO', sizes=[(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)])"
-              
               pyinstaller --noconfirm --onedir --windowed \
                 --icon "app.ico" \
                 --add-data "assets;assets" \
                 --add-data "skins;skins" \
                 --name "Compet" main.py
-                
               cd dist
               7z a -tzip ../Compet-Windows.zip Compet
               cd ..
@@ -37,8 +33,6 @@ jobs:
             run_build: |
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput pyobjc-framework-Cocoa pyobjc-framework-ApplicationServices Pillow
-              
-              # icon.png를 macOS용 icon.icns로 자동 변환
               mkdir -p icon.iconset
               sips -z 16 16     assets/icon.png --out icon.iconset/icon_16x16.png
               sips -z 32 32     assets/icon.png --out icon.iconset/icon_16x16@2x.png
@@ -68,10 +62,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -94,7 +88,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
