@@ -18,12 +18,37 @@ jobs:
             run_build: |
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput Pillow
-              python -c "from PIL import Image; img = Image.open('assets/icon.png'); img.save('app.ico', format='ICO', sizes=[(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)])"
+
+              # 아이콘 경로 탐색 및 ICO 생성 (경로 fallback 지원)
+              python - << 'EOF'
+              import os
+              from PIL import Image
+
+              candidates = ['assets/icon.png', 'assets/icons/app_icon.png', 'assets/icons/icon.png']
+              src = next((p for p in candidates if os.path.exists(p)), None)
+
+              if src:
+                  try:
+                      img = Image.open(src)
+                      img.save('app.ico', format='ICO', sizes=[(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)])
+                      print(f"[Icon] Successfully created app.ico from {src}")
+                  except Exception as e:
+                      print(f"[Icon] Failed to create app.ico: {e}")
+              else:
+                  print("[Icon] No valid icon file found. Building without custom icon.")
+              EOF
+
+              ICON_OPT=""
+              if [ -f "app.ico" ]; then
+                ICON_OPT="--icon app.ico"
+              fi
+
               pyinstaller --noconfirm --onedir --windowed \
-                --icon "app.ico" \
+                $ICON_OPT \
                 --add-data "assets;assets" \
                 --add-data "skins;skins" \
                 --name "Compet" main.py
+
               cd dist
               7z a -tzip ../Compet-Windows.zip Compet
               cd ..
@@ -33,26 +58,45 @@ jobs:
             run_build: |
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput pyobjc-framework-Cocoa pyobjc-framework-ApplicationServices Pillow
-              mkdir -p icon.iconset
-              sips -z 16 16     assets/icon.png --out icon.iconset/icon_16x16.png
-              sips -z 32 32     assets/icon.png --out icon.iconset/icon_16x16@2x.png
-              sips -z 32 32     assets/icon.png --out icon.iconset/icon_32x32.png
-              sips -z 64 64     assets/icon.png --out icon.iconset/icon_32x32@2x.png
-              sips -z 128 128   assets/icon.png --out icon.iconset/icon_128x128.png
-              sips -z 256 256   assets/icon.png --out icon.iconset/icon_128x128@2x.png
-              sips -z 256 256   assets/icon.png --out icon.iconset/icon_256x256.png
-              sips -z 512 512   assets/icon.png --out icon.iconset/icon_256x256@2x.png
-              sips -z 512 512   assets/icon.png --out icon.iconset/icon_512x512.png
-              sips -z 1024 1024 assets/icon.png --out icon.iconset/icon_512x512@2x.png
-              iconutil -c icns icon.iconset -o app.icns
-              
+
+              # 아이콘 경로 탐색 및 icns 생성 (경로 fallback 지원)
+              python - << 'EOF'
+              import os, subprocess
+              from PIL import Image
+
+              candidates = ['assets/icon.png', 'assets/icons/app_icon.png', 'assets/icons/icon.png']
+              src = next((p for p in candidates if os.path.exists(p)), None)
+
+              if src:
+                  try:
+                      os.makedirs('icon.iconset', exist_ok=True)
+                      img = Image.open(src)
+                      sizes = [16, 32, 64, 128, 256, 512]
+                      for s in sizes:
+                          img.resize((s, s), Image.Resampling.LANCZOS).save(f'icon.iconset/icon_{s}x{s}.png')
+                          if s * 2 <= 1024:
+                              img.resize((s * 2, s * 2), Image.Resampling.LANCZOS).save(f'icon.iconset/icon_{s}x{s}@2x.png')
+                      subprocess.run(['iconutil', '-c', 'icns', 'icon.iconset', '-o', 'app.icns'], check=False)
+                      print(f"[Icon] Successfully created app.icns from {src}")
+                  except Exception as e:
+                      print(f"[Icon] Failed to create app.icns: {e}")
+              else:
+                  print("[Icon] No valid icon file found. Building without custom icon.")
+              EOF
+
+              ICON_OPT=""
+              if [ -f "app.icns" ]; then
+                ICON_OPT="--icon app.icns"
+              fi
+
               pyinstaller --noconfirm --windowed \
-                --icon "app.icns" \
+                $ICON_OPT \
                 --osx-bundle-identifier "com.morningmeal.compet" \
                 --add-data "assets:assets" \
                 --add-data "skins:skins" \
                 --name "Compet" main.py
-                
+
+              # macOS Info.plist에 백그라운드 이벤트 감지 및 권한 설명 추가
               /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string 'Compet needs access to detect keystrokes for pet animations.'" dist/Compet.app/Contents/Info.plist || true
               /usr/libexec/PlistBuddy -c "Add :NSSystemAdministrationUsageDescription string 'Compet needs accessibility access for global key input listener.'" dist/Compet.app/Contents/Info.plist || true
 
@@ -62,10 +106,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -88,7 +132,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
