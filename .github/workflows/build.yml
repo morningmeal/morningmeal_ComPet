@@ -21,7 +21,10 @@ jobs:
                 --add-data "assets;assets" \
                 --add-data "skins;skins" \
                 --name "Compet" main.py
-              7z a -tzip Compet-Windows.zip ./dist/Compet/*
+              # dist 폴더 안으로 이동하여 Compet 폴더 전체를 온전하게 압축
+              cd dist
+              7z a -tzip ../Compet-Windows.zip Compet
+              cd ..
 
           - os: macos-latest
             artifact_name: Compet-macOS.zip
