@@ -3,26 +3,36 @@ import os
 import sys
 import json
 import uuid
+import shutil
 
+# 1. 번들된 리소스(읽기 전용 에셋)가 위치한 루트 경로 계산
 if getattr(sys, 'frozen', False):
-    if sys.platform == 'darwin':
-        APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(sys.executable))) 
+    # PyInstaller로 패키징된 환경
+    if hasattr(sys, '_MEIPASS'):
+        BUNDLE_DIR = sys._MEIPASS
     else:
-        APP_DIR = os.path.dirname(sys.executable)
+        if sys.platform == 'darwin':
+            # macOS .app/Contents/MacOS -> .app/Contents/Resources
+            BUNDLE_DIR = os.path.dirname(sys.executable)
+        else:
+            BUNDLE_DIR = os.path.dirname(sys.executable)
 else:
-    APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 개발 중 로컬 소스 실행 환경
+    BUNDLE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 2. 사용자 데이터(설정, 커스텀 스킨)가 저장될 디렉터리 (쓰기 가능 경로)
 if sys.platform == 'darwin':
     USER_DATA_DIR = os.path.expanduser("~/Library/Application Support/morningmeal_Compet")
 else:
-    USER_DATA_DIR = APP_DIR
+    USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".morningmeal_Compet")
 
 SKINS_DIR = os.path.join(USER_DATA_DIR, "skins")
 GLOBAL_CONFIG = os.path.join(USER_DATA_DIR, "settings.json")
 CRASH_LOG_PATH = os.path.join(USER_DATA_DIR, "crash_log.txt")
 
-ASSETS_DIR = os.path.join(APP_DIR, "assets", "sounds")
-PRESETS_DIR = os.path.join(ASSETS_DIR, "presets")
+# 번들 리소스 경로
+ASSETS_DIR = os.path.join(BUNDLE_DIR, "assets", "sounds")
+BUNDLE_SKINS_DIR = os.path.join(BUNDLE_DIR, "skins")
 
 class ConfigManager:
     def __init__(self):
@@ -32,12 +42,22 @@ class ConfigManager:
     def _ensure_dirs(self):
         os.makedirs(USER_DATA_DIR, exist_ok=True)
         os.makedirs(SKINS_DIR, exist_ok=True)
-        os.makedirs(PRESETS_DIR, exist_ok=True)
-        
-        default_skin_dir = os.path.join(SKINS_DIR, "default")
-        if not os.path.exists(default_skin_dir):
-            os.makedirs(default_skin_dir)
-            self.save_skin_config("default", {"squash_depth": 0.20})
+
+        # 번들에 포함된 기본 스킨(default 등)을 사용자 스킨 폴더로 자동 복사
+        default_user_skin = os.path.join(SKINS_DIR, "default")
+        bundle_default_skin = os.path.join(BUNDLE_SKINS_DIR, "default")
+
+        if not os.path.exists(default_user_skin):
+            if os.path.exists(bundle_default_skin):
+                shutil.copytree(bundle_default_skin, default_user_skin)
+            else:
+                os.makedirs(default_user_skin, exist_ok=True)
+                self.save_skin_config("default", {
+                    "squash_depth": 0.20,
+                    "idle_image": "idle.png",
+                    "tap_images": ["tap_left.png", "tap_right.png"],
+                    "key_mappings": {}
+                })
 
     def load_global_settings(self):
         default_settings = {
@@ -60,7 +80,8 @@ class ConfigManager:
             try:
                 with open(GLOBAL_CONFIG, "r", encoding="utf-8") as f:
                     default_settings.update(json.load(f))
-            except: pass
+            except:
+                pass
         
         if not default_settings["instances"]:
             default_settings["instances"].append({
@@ -83,12 +104,9 @@ class ConfigManager:
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    conf.update(data)
-                    # 이전 버전 호환 (bounce_stiffness만 있고 squash_depth가 없는 경우)
-                    if "squash_depth" not in data and "bounce_stiffness" in data:
-                        conf["squash_depth"] = 0.20
-            except: pass
+                    conf.update(json.load(f))
+            except:
+                pass
         return conf
 
     def save_skin_config(self, skin_name, data):

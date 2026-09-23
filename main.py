@@ -10,6 +10,7 @@ from core.sound_manager import sound_mgr
 from core.input_listener import input_bridge, start_global_listener
 from ui.settings_window import SettingsWindow
 from ui.pet_widget import PetWidget
+from core.config_manager import config_mgr, CRASH_LOG_PATH, BUNDLE_DIR
 
 def set_mac_dock_policy(hide):
     if sys.platform != 'darwin': 
@@ -42,7 +43,12 @@ sys.excepthook = global_exception_handler
 
 class AppController:
     def __init__(self):
-        sound_mgr.ensure_initialized()
+        icon_path = os.path.join(BUNDLE_DIR, "assets", "icons", "app_icon.png")
+        if os.path.exists(icon_path):
+            self.tray_icon = QSystemTrayIcon(QIcon(icon_path), QApplication.instance())
+        else:  
+            self.tray_icon = QSystemTrayIcon(QApplication.instance())
+            sound_mgr.ensure_initialized()
 
         self.active_pets = []
         self.settings_win = SettingsWindow()
