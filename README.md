@@ -5,8 +5,6 @@ Windows와 macOS를 모두 지원하며, 멀티 펫 관리와 실시간 커스�
 
 ## 📥 즉시 다운로드 (Latest Release)
 
-설치 과정 없이 압축을 풀고 바로 실행할 수 있는 무설치 포터블 버전입니다.
-
 | 플랫폼 | 다운로드 링크 | 파일 포맷 |
 | :--- | :--- | :--- |
 | **Windows** | [⬇️ Compet-Windows.zip 다운로드](https://github.com/morningmeal/morningmeal_ComPet/releases/latest/download/Compet-Windows.zip) | `.zip` (실행 파일 포함) |
@@ -31,15 +29,3 @@ Windows와 macOS를 모두 지원하며, 멀티 펫 관리와 실시간 커스�
      ```bash
      xattr -cr /Applications/Compet.app
      ```
-
----
-
-## ✨ 주요 기능
-- **Cross-Platform 지원**: Windows 및 macOS Dock 제어/권한 분기 처리
-- **동적 3×N 펫 관리**: 여러 마리의 펫을 독립된 크기(30%~300%)와 스킨으로 동시 배치
-- **모션 압축 깊이(Squash Depth) 제어**: 타건 강도와 속도(APM)에 비례한 물리 압축 애니메이션
-- **사운드 자동 스캔**: `assets/sounds/` 폴더 내 WAV 파일 자동 감지 및 개별 볼륨 제어
-- **단축키 & 상호작용**:
-  * `Ctrl(또는 Cmd) + 마우스 휠`: 펫 크기 실시간 조절
-  * 펫 우클릭: 펫 복제, 즉시 스킨 변경, 설정 창 열기
-  * 화면 모서리 자석 스냅 & 마우스 클릭 관통(Click-Through) 모드
