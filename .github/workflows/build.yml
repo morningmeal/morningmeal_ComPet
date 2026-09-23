@@ -18,7 +18,7 @@ jobs:
               python -m pip install --upgrade pip
               pip install pyinstaller PyQt6 pynput
               pyinstaller --noconfirm --onedir --windowed --add-data "assets;assets" --add-data "skins;skins" main.py --name "Compet"
-              Compress-Archive -Path "dist/Compet" -DestinationPath "Compet-Windows.zip" -Force
+              7z a -tzip Compet-Windows.zip ./dist/Compet/*
 
           - os: macos-latest
             artifact_name: Compet-macOS.zip
