@@ -232,9 +232,11 @@ class PetWidget(QWidget):
         if event.buttons() == Qt.MouseButton.LeftButton:
             new_pos = event.globalPosition().toPoint() - self.drag_position
 
-            # 1. 화면 밖으로 나가지 않는 기능이 켜져 있을 때만 화면 가장자리에 딱 붙도록 제한
+            # clamp_to_screen 옵션 활성화 시 모니터 경계선 내에 고정
             if config_mgr.settings.get("clamp_to_screen", True):
-                screen = QApplication.screenAt(event.globalPosition().toPoint()) or self.screen()
+                # macOS 다중 모니터 대응 fallback
+                target_point = event.globalPosition().toPoint()
+                screen = QApplication.screenAt(target_point) or self.screen() or QApplication.primaryScreen()
                 if screen:
                     geo = screen.availableGeometry()
                     max_x = geo.right() - self.width()
@@ -243,14 +245,12 @@ class PetWidget(QWidget):
                     new_y = max(geo.top(), min(new_pos.y(), max_y))
                     new_pos = QPoint(new_x, new_y)
 
-            # 2. 기능이 꺼져 있으면 계산된 new_pos(화면 밖 포함) 그대로 자유 이동
             self.move(new_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        # 1. 화면 밖으로 나가지 않는 기능이 켜져 있을 때만 최종 놓은 위치를 가장자리에 고정
         if config_mgr.settings.get("clamp_to_screen", True):
-            screen = QApplication.screenAt(self.geometry().center()) or self.screen()
+            screen = QApplication.screenAt(self.geometry().center()) or self.screen() or QApplication.primaryScreen()
             if screen:
                 geo = screen.availableGeometry()
                 max_x = geo.right() - self.width()
@@ -259,7 +259,6 @@ class PetWidget(QWidget):
                 clamped_y = max(geo.top(), min(self.y(), max_y))
                 self.move(clamped_x, clamped_y)
 
-        # 2. 현재 놓여진 실제 위치(자유 좌표 또는 가장자리 제한 좌표)를 설정에 저장
         self.instance_data["x"] = self.x()
         self.instance_data["y"] = self.y()
         config_mgr.save_global_settings()

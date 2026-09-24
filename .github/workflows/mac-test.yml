@@ -1,0 +1,73 @@
+# .github/workflows/mac-test.yml
+name: macOS Compatibility Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Actions 탭에서 수동 실행 버튼 활성화
+
+jobs:
+  test-macos:
+    runs-on: macos-latest # GitHub이 제공하는 최신 macOS 실시간 가상머신
+
+    steps:
+      - name: 저장소 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 환경 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 의존성 패키지 설치
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # macOS Cocoa API 바인딩 설치 (AppKit/PyObjC 테스트용)
+          pip install pyobjc-framework-Cocoa pyobjc-framework-ApplicationServices pytest
+
+      - name: macOS 호환성 및 GUI 무결성 테스트 실행
+        env:
+          QT_QPA_PLATFORM: offscreen # 가상 화면(헤드리스) 모드로 실행
+        run: |
+          python -c "
+          import sys
+          print(f'=== Python {sys.version} on macOS ===')
+
+          # 1. macOS 전용 모듈 및 권한 확인 함수 임포트 테스트
+          from core.input_listener import check_mac_accessibility, normalize_key_token, input_bridge
+          from core.config_manager import config_mgr, BUNDLE_DIR, USER_DATA_DIR
+          from core.sound_manager import sound_mgr, scan_sound_files
+          from core.i18n import I18n
+          print('[OK] Core modules imported successfully')
+
+          # 2. PyQt6 및 GUI 클래스 인스턴스화 테스트 (Offscreen 환경)
+          from PyQt6.QtWidgets import QApplication
+          app = QApplication(sys.argv)
+          print('[OK] QApplication created')
+
+          from ui.settings_window import SettingsWindow
+          from ui.pet_widget import PetWidget
+
+          # 설정 로드 및 창 인스턴스 생성
+          win = SettingsWindow()
+          print('[OK] SettingsWindow initialized without error')
+
+          # 펫 위젯 생성 및 macOS 리소스 로드 검증
+          test_inst = {'id': 'test', 'skin': 'default', 'scale': 1.0, 'x': 100, 'y': 100}
+          pet = PetWidget(test_inst)
+          print('[OK] PetWidget initialized and resources loaded')
+
+          # 3. macOS 키보드/마우스 시그널 라우팅 가상 주입 테스트
+          received = []
+          input_bridge.key_pressed.connect(lambda k: received.append(k))
+
+          # Command 키 조합 및 Shift 특수문자 페이로드 시뮬레이션
+          pet.trigger_bounce('cmd+1|1')
+          pet.trigger_bounce('!|shift+1')
+          print('[OK] Pet animation bounce triggered with macOS key payloads')
+
+          print('=== All macOS Compatibility Checks Passed! ===')
+          "

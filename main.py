@@ -30,6 +30,7 @@ def set_mac_dock_policy(hide):
     try:
         from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationActivationPolicyRegular
         app = NSApplication.sharedApplication()
+        # macOS에서는 백그라운드 위젯이라도 설정창 활성화를 위해 Regular를 기본 유지하는 것이 안전합니다.
         if hide:
             app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         else:
