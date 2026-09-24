@@ -586,10 +586,10 @@ class SettingsWindow(QWidget):
 
     def update_pet_card_scale(self, pet_id, scale_val):
         if pet_id in self.pet_cards:
-            self.pet_cards[pet_id].sync_scale_from_external(scale_val)[cite: 12, 14]
+            self.pet_cards[pet_id].sync_scale_from_external(scale_val)
             inst = next((i for i in config_mgr.settings["instances"] if i.get("id") == pet_id), None)
             if inst:
-                self.pet_cards[pet_id].sync_skin(inst.get("skin", "default"))[cite: 12]
+                self.pet_cards[pet_id].sync_skin(inst.get("skin", "default"))
 
     def import_skin(self):
         path, _ = QFileDialog.getOpenFileName(self, I18n.tr("open_skin_zip"), "", I18n.tr("zip_filter"))
