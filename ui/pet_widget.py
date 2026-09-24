@@ -23,6 +23,7 @@ class PetWidget(QWidget):
         self.squash_depth = 0.20
         self.stiffness = 0.25
         self.hit_times = deque(maxlen=20)
+        self.drag_position = QPoint()
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.update_window_flags()
@@ -59,7 +60,7 @@ class PetWidget(QWidget):
         self.idle_pixmap = QPixmap(os.path.join(s_dir, skin_conf.get("idle_image", "idle.png")))
         self.tap_pixmaps = [QPixmap(os.path.join(s_dir, p)) for p in skin_conf.get("tap_images", ["tap_left.png", "tap_right.png"])]
         
-        # 키 매핑 픽스맵 캐싱 (공백 제거 및 대소문자 방어)
+        # 키 매핑 픽스맵 캐싱
         self.cached_pixmaps = {}
         for k, v in self.key_mappings.items():
             img_path = os.path.join(s_dir, v)
@@ -82,28 +83,20 @@ class PetWidget(QWidget):
             if dt > 0:
                 apm = (len(self.hit_times) / dt) * 60
 
-        # 후보 분리 (예: ["!", "shift+1", "1"])
         candidates = [c.strip() for c in key_payload.split("|") if c.strip()]
         
         matched_pixmap = None
-        matched_key = None
-
-        # 1. 스킨 매핑 테이블에서 일치하는 키 검색
         for cand in candidates:
-            if cand in self.cached_pixmaps:
+            if cand in self.cached_pixmaps and not self.cached_pixmaps[cand].isNull():
                 matched_pixmap = self.cached_pixmaps[cand]
-                matched_key = cand
                 break
-            if cand.lower() in self.cached_pixmaps:
-                matched_pixmap = self.cached_pixmaps[cand.lower()]
-                matched_key = cand.lower()
+            cand_lower = cand.lower()
+            if cand_lower in self.cached_pixmaps and not self.cached_pixmaps[cand_lower].isNull():
+                matched_pixmap = self.cached_pixmaps[cand_lower]
                 break
 
-        # 2. 이미지 교체 결정
-        if matched_pixmap and not matched_pixmap.isNull():
+        if matched_pixmap:
             self.current_pixmap = matched_pixmap
-            # (디버그 확인용 출력)
-            print(f"[Pet] Matched Custom Key: '{matched_key}' -> Custom Image Displayed")
         elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
             self.current_pixmap = self.cached_pixmaps["mouse_click"]
         else:
@@ -117,12 +110,11 @@ class PetWidget(QWidget):
         self.scale_y = max(0.20, 1.0 - actual_depth)
         self.scale_x = 1.0 + (actual_depth * 0.5)
 
-        # 특수 매핑 이미지의 경우 표정이 보이도록 idle 복귀 시간을 살짝 넉넉하게 220ms 부여
         reset_ms = 240 if matched_pixmap else 160
         self.reset_timer.start(reset_ms)
         self.anim_timer.start(16)
         self.update()
-        
+
     def update_widget_size(self):
         if not self.idle_pixmap.isNull():
             orig_w = self.idle_pixmap.width()
@@ -143,6 +135,8 @@ class PetWidget(QWidget):
         self.instance_data["skin"] = new_skin
         config_mgr.save_global_settings()
         self.load_resources()
+        # 설정 창의 펫 카드 그리드 동기화 트리거
+        self.scale_changed.emit(self.instance_data.get("id", ""), self.display_scale)
 
     def wheelEvent(self, event: QWheelEvent):
         modifiers = QApplication.keyboardModifiers()
@@ -161,11 +155,8 @@ class PetWidget(QWidget):
         settings_action = menu.addAction(I18n.tr("tray_show"))
         duplicate_action = menu.addAction(I18n.tr("duplicate_pet"))
 
-        # 활성화된 펫이 2개 이상일 때만 삭제 옵션 표시
-        remove_action = None
-        total_pets = self.get_total_pets_callback() if self.get_total_pets_callback else len(config_mgr.settings.get("instances", []))
-        if total_pets > 1:
-            remove_action = menu.addAction(I18n.tr("remove_pet"))
+        # 0마리 허용: 마리 수와 상관없이 항상 삭제 메뉴 노출
+        remove_action = menu.addAction(I18n.tr("remove_pet"))
 
         menu.addSeparator()
         
@@ -191,54 +182,11 @@ class PetWidget(QWidget):
         elif chosen == duplicate_action:
             if self.duplicate_callback:
                 self.duplicate_callback(self.instance_data)
-        elif remove_action and chosen == remove_action:
+        elif chosen == remove_action:
             if self.remove_callback:
                 self.remove_callback(self.instance_data.get("id"))
         elif chosen == exit_action:
             QApplication.quit()
-
-    def trigger_bounce(self, key_payload):
-        now = time.time()
-        self.hit_times.append(now)
-        apm = 0
-        if len(self.hit_times) > 1:
-            dt = now - self.hit_times[0]
-            if dt > 0:
-                apm = (len(self.hit_times) / dt) * 60
-
-        # 후보군 분리 (예: ["!", "shift+1", "1"])
-        candidates = [c.strip() for c in key_payload.split("|")]
-        
-        matched_pixmap = None
-        for cand in candidates:
-            # 1. 대소문자 일치 검사
-            if cand in self.cached_pixmaps and not self.cached_pixmaps[cand].isNull():
-                matched_pixmap = self.cached_pixmaps[cand]
-                break
-            # 2. 소문자 일치 검사
-            cand_lower = cand.lower()
-            if cand_lower in self.cached_pixmaps and not self.cached_pixmaps[cand_lower].isNull():
-                matched_pixmap = self.cached_pixmaps[cand_lower]
-                break
-
-        if matched_pixmap:
-            self.current_pixmap = matched_pixmap
-        elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
-            self.current_pixmap = self.cached_pixmaps["mouse_click"]
-        else:
-            if self.tap_pixmaps:
-                self.current_pixmap = self.tap_pixmaps[self.tap_index]
-                self.tap_index = (self.tap_index + 1) % len(self.tap_pixmaps)
-
-        extra_squash = min(apm / 600.0, 1.0) * 0.08
-        actual_depth = min(self.squash_depth + extra_squash, 0.75)
-
-        self.scale_y = max(0.20, 1.0 - actual_depth)
-        self.scale_x = 1.0 + (actual_depth * 0.5)
-
-        self.reset_timer.start(180)
-        self.anim_timer.start(16)
-        self.update()
 
     def update_animation(self):
         if abs(self.scale_x - 1.0) < 0.005 and abs(self.scale_y - 1.0) < 0.005:
@@ -282,25 +230,37 @@ class PetWidget(QWidget):
         if config_mgr.settings.get("lock_position", False):
             return
         if event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
+            new_pos = event.globalPosition().toPoint() - self.drag_position
+
+            # 1. 화면 밖으로 나가지 않는 기능이 켜져 있을 때만 화면 가장자리에 딱 붙도록 제한
+            if config_mgr.settings.get("clamp_to_screen", True):
+                screen = QApplication.screenAt(event.globalPosition().toPoint()) or self.screen()
+                if screen:
+                    geo = screen.availableGeometry()
+                    max_x = geo.right() - self.width()
+                    max_y = geo.bottom() - self.height()
+                    new_x = max(geo.left(), min(new_pos.x(), max_x))
+                    new_y = max(geo.top(), min(new_pos.y(), max_y))
+                    new_pos = QPoint(new_x, new_y)
+
+            # 2. 기능이 꺼져 있으면 계산된 new_pos(화면 밖 포함) 그대로 자유 이동
+            self.move(new_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        screen = QApplication.screenAt(self.geometry().center())
-        if screen:
-            geom = screen.availableGeometry()
-            snap_dist = 20
-            x, y = self.x(), self.y()
-            if x < geom.left() + snap_dist:
-                x = geom.left()
-            if x + self.width() > geom.right() - snap_dist:
-                x = geom.right() - self.width()
-            if y < geom.top() + snap_dist:
-                y = geom.top()
-            if y + self.height() > geom.bottom() - snap_dist:
-                y = geom.bottom() - self.height()
-            self.move(x, y)
+        # 1. 화면 밖으로 나가지 않는 기능이 켜져 있을 때만 최종 놓은 위치를 가장자리에 고정
+        if config_mgr.settings.get("clamp_to_screen", True):
+            screen = QApplication.screenAt(self.geometry().center()) or self.screen()
+            if screen:
+                geo = screen.availableGeometry()
+                max_x = geo.right() - self.width()
+                max_y = geo.bottom() - self.height()
+                clamped_x = max(geo.left(), min(self.x(), max_x))
+                clamped_y = max(geo.top(), min(self.y(), max_y))
+                self.move(clamped_x, clamped_y)
 
+        # 2. 현재 놓여진 실제 위치(자유 좌표 또는 가장자리 제한 좌표)를 설정에 저장
         self.instance_data["x"] = self.x()
         self.instance_data["y"] = self.y()
         config_mgr.save_global_settings()
+        event.accept()

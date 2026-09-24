@@ -19,7 +19,6 @@ QT_SHIFT_MAP = {
     ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~'
 }
 
-# Qt 고유 Key Enum 특수기호 매핑 (event.text()가 빈 문자열일 때 대비)
 QT_SPECIAL_KEYS = {
     Qt.Key.Key_Exclam: "!",
     Qt.Key.Key_At: "@",
@@ -49,8 +48,22 @@ class KeyCaptureButton(QPushButton):
     keyCaptured = pyqtSignal(str)
 
     def __init__(self, text="", parent=None):
-        super().__init__(text or I18n.tr("input_waiting"), parent)
+        waiting_text = I18n.tr("input_waiting")
+        # 입력된 텍스트가 없거나 플레이스홀더면 빈 값으로 처리
+        self.raw_key = text if (text and text != waiting_text) else ""
+        super().__init__(self.raw_key or waiting_text, parent)
         self.capturing = False
+
+        # 언어 변경 시그널 연결
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def retranslate_ui(self):
+        """언어가 변경되었을 때 키가 미설정된 상태라면 안내 텍스트 갱신"""
+        if not self.raw_key:
+            if self.capturing:
+                self.setText(I18n.tr("input_detecting"))
+            else:
+                self.setText(I18n.tr("input_waiting"))
 
     def mousePressEvent(self, event: QMouseEvent):
         if not self.capturing:
@@ -73,6 +86,7 @@ class KeyCaptureButton(QPushButton):
         else:
             k_name = "mouse_click"
 
+        self.raw_key = k_name
         self.setText(k_name)
         self.capturing = False
         self.setProperty("activeCapture", False)
@@ -89,7 +103,7 @@ class KeyCaptureButton(QPushButton):
         key = event.key()
         modifiers = event.modifiers()
 
-        # Shift, Ctrl, Alt 등 제어키 단독 입력 시 대기 유지
+        # 제어 키 단독 입력 시 대기 유지
         if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
             event.accept()
             return
@@ -109,14 +123,13 @@ class KeyCaptureButton(QPushButton):
         elif text and text in "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./":
             final_key = text
 
-        # 3. Shift가 눌려있고 숫자가 눌린 경우 (Shift + 1 -> !)
+        # 3. Shift + 숫자/기호 키 처리 (Shift + 1 -> !)
         elif is_shift:
-            # 0~9 키 또는 문자
             char_guess = chr(key).lower() if (32 <= key <= 126) else text.lower()
             if char_guess in QT_SHIFT_MAP:
                 final_key = QT_SHIFT_MAP[char_guess]
 
-        # 4. 특수문자가 아닌 일반 키 또는 조합 키 처리
+        # 4. 일반 키 또는 조합 키 처리
         if not final_key:
             key_names = {
                 Qt.Key.Key_Space: "space",
@@ -133,6 +146,8 @@ class KeyCaptureButton(QPushButton):
             base = key_names.get(key, text.lower() if text else f"key_{key}")
 
             mod_parts = []
+            if modifiers & Qt.KeyboardModifier.MetaModifier:
+                mod_parts.append("cmd" if sys.platform == "darwin" else "win")
             if is_ctrl: mod_parts.append("ctrl")
             if is_alt: mod_parts.append("alt")
             if is_shift: mod_parts.append("shift")
@@ -142,80 +157,13 @@ class KeyCaptureButton(QPushButton):
             else:
                 final_key = base
 
-        # 캡처 완료 처리
+        self.raw_key = final_key
         self.setText(final_key)
         self.capturing = False
         self.setProperty("activeCapture", False)
         self.style().unpolish(self)
         self.style().polish(self)
         self.keyCaptured.emit(final_key)
-        event.accept()
-
-    def keyPressEvent(self, event: QKeyEvent):
-        if not self.capturing:
-            super().keyPressEvent(event)
-            return
-
-        key = event.key()
-        modifiers = event.modifiers()
-
-        # Shift, Ctrl, Alt, Meta 단독 입력 중일 때는 대기 상태 유지
-        if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
-            event.accept()
-            return
-
-        # 1. 사용자가 누른 키로 인해 실제로 생성된 텍스트 확인
-        text = event.text().strip()
-
-        # ★ 2. 특수문자 최우선 감지 (!, ?, @, #, $, %, ^, &, *, ~, 등)
-        # Shift 조합으로 타이핑된 특수문자는 modifiers 표기 없이 기호 자체를 감지값으로 확정
-        symbols = "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./"
-        if text and text in symbols:
-            final_name = text
-            self.setText(final_name)
-            self.capturing = False
-            self.setProperty("activeCapture", False)
-            self.style().unpolish(self)
-            self.style().polish(self)
-            self.keyCaptured.emit(final_name)
-            event.accept()
-            return
-
-        # 3. 특수 기능 키 매핑
-        key_map = {
-            Qt.Key.Key_Space: "space",
-            Qt.Key.Key_Return: "enter",
-            Qt.Key.Key_Enter: "enter",
-            Qt.Key.Key_Tab: "tab",
-            Qt.Key.Key_Backspace: "backspace",
-            Qt.Key.Key_Escape: "esc",
-            Qt.Key.Key_Left: "left",
-            Qt.Key.Key_Right: "right",
-            Qt.Key.Key_Up: "up",
-            Qt.Key.Key_Down: "down"
-        }
-        base_name = key_map.get(key, text.lower() if text else f"key_{key}")
-
-        # 4. Ctrl, Alt 조합 키 접두사 구성 (Shift는 기호가 아닌 영문 대문자/단축키일 때만 포함)
-        mod_parts = []
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            mod_parts.append("ctrl")
-        if modifiers & Qt.KeyboardModifier.AltModifier:
-            mod_parts.append("alt")
-        if modifiers & Qt.KeyboardModifier.ShiftModifier and not text:
-            mod_parts.append("shift")
-
-        if mod_parts:
-            final_name = "+".join(mod_parts) + "+" + base_name
-        else:
-            final_name = base_name
-
-        self.setText(final_name)
-        self.capturing = False
-        self.setProperty("activeCapture", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.keyCaptured.emit(final_name)
         event.accept()
 
 
@@ -247,6 +195,7 @@ class PetCardWidget(QFrame):
         top_bar.setContentsMargins(0, 0, 0, 0)
         top_bar.addStretch()
         
+        # 0마리 허용: X버튼 누르면 언제든 삭제
         del_btn = QPushButton("❌")
         del_btn.setFixedSize(20, 20)
         del_btn.setStyleSheet("""
@@ -379,6 +328,14 @@ class PetCardWidget(QFrame):
         self.update_preview_image()
         self.changed.emit()
 
+    def sync_skin(self, skin_name):
+        """외부(펫 우클릭 메뉴 등)에서 스킨이 변경되었을 때 콤보박스와 프리뷰 즉시 동기화"""
+        self.skin_combo.blockSignals(True)
+        self.skin_combo.setCurrentText(skin_name)
+        self.instance_data["skin"] = skin_name
+        self.skin_combo.blockSignals(False)
+        self.update_preview_image()
+
     def on_slider_changed(self, val):
         self.scale_spinbox.blockSignals(True)
         self.scale_spinbox.setValue(val)
@@ -454,22 +411,34 @@ class SoundControlWidget(QGroupBox):
         self.sound_combo.blockSignals(True)
         self.sound_combo.clear()
 
-        self.sound_combo.addItem("🔇 " + I18n.tr("using_default_sound"), "")
-
+        # assets/sounds 폴더 내 실제 wav 파일들을 실시간 스캔
         scanned = scan_sound_files()
         cur_saved = config_mgr.settings.get(f"{self.prefix}_sound_path", "")
         
         selected_index = 0
-        idx = 1
+        idx = 0
+        
+        # 실제 사운드 파일들만 순수하게 목록에 추가
         for display_name, full_path in scanned.items():
-            self.sound_combo.addItem("🎵 " + display_name, full_path)
+            self.sound_combo.addItem(f"🎵 {display_name}", full_path)
+            # 저장된 설정값과 일치하는 파일 선택
             if cur_saved and (cur_saved == full_path or cur_saved == os.path.basename(full_path)):
                 selected_index = idx
             idx += 1
 
+        # 맨 하단에 파일 직접 업로드/가져오기 항목만 배치
         self.sound_combo.addItem("➕ " + I18n.tr("upload_sound") + "...", "__import__")
 
-        self.sound_combo.setCurrentIndex(selected_index)
+        # 목록에 파일이 하나라도 있다면 매칭된 파일(또는 첫 번째 파일)을 기본 선택
+        if self.sound_combo.count() > 1:
+            self.sound_combo.setCurrentIndex(selected_index)
+            # 만약 저장된 경로가 비어있었다면 첫 번째 실제 파일 경로를 설정에 자동 반영
+            if not cur_saved:
+                first_path = self.sound_combo.itemData(0)
+                if first_path and first_path != "__import__":
+                    config_mgr.settings[f"{self.prefix}_sound_path"] = first_path
+                    config_mgr.save_global_settings()
+        
         self.sound_combo.blockSignals(False)
 
     def retranslate_ui(self):
@@ -492,13 +461,16 @@ class SoundControlWidget(QGroupBox):
     def on_sound_selected(self, index):
         data = self.sound_combo.itemData(index)
 
+        # 사운드 파일 추가 버튼 클릭 시
         if data == "__import__":
             self.import_sound_file()
             return
 
-        config_mgr.settings[f"{self.prefix}_sound_path"] = data or ""
-        config_mgr.save_global_settings()
-        sound_mgr.load_sounds()
+        # assets/sounds 폴더 내 실제 선택된 사운드 경로 저장
+        if data:
+            config_mgr.settings[f"{self.prefix}_sound_path"] = data
+            config_mgr.save_global_settings()
+            sound_mgr.load_sounds()
 
     def import_sound_file(self):
         filter_str = "WAV Files (*.wav)"

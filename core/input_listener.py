@@ -61,7 +61,7 @@ def normalize_key_token(token):
 
 def on_key_press(key):
     try:
-        # 1. 제어 키 상태 업데이트
+        # 1. 제어 키 상태 업데이트 (macOS cmd 키 포함)
         if key in (keyboard.Key.shift, keyboard.Key.shift_r, keyboard.Key.shift_l):
             active_modifiers.add("shift")
             return
@@ -71,10 +71,14 @@ def on_key_press(key):
         elif key in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
             active_modifiers.add("alt")
             return
+        elif key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):  # ★ macOS Command 키
+            active_modifiers.add("cmd")
+            return
 
         is_shift = "shift" in active_modifiers
         is_ctrl = "ctrl" in active_modifiers
         is_alt = "alt" in active_modifiers
+        is_cmd = "cmd" in active_modifiers
 
         # 2. 키 이름 추출 및 가상 키코드 복원
         char_val = getattr(key, 'char', None)
@@ -82,7 +86,6 @@ def on_key_press(key):
 
         if char_val is not None:
             raw_char = str(char_val)
-            # Ctrl+키 조합 시 발생하는 제어문자(ASCII 1~26) 처리 (예: Ctrl+A -> \x01)
             if len(raw_char) == 1 and ord(raw_char) < 32:
                 base_name = chr(ord(raw_char) + 96).lower()
             else:
@@ -92,19 +95,17 @@ def on_key_press(key):
             clean_name = str(raw_name).replace("Key.", "").replace("key.", "")
             base_name = normalize_key_token(clean_name)
 
-        # 3. 키 후보군 도출 (우선순위 순서대로 배열)
+        # 3. 키 후보군 도출
         resolved_keys = []
 
-        # (1) 특수문자(!, ? 등) 직접 타이핑된 경우
         if char_val and char_val in "!@#$%^&*()_+{}|:\"<>?~":
             resolved_keys.append(char_val)
 
-        # (2) Shift + 숫자/기호인 경우 (예: Shift + 1 -> !)
         if is_shift and base_name in SHIFT_MAP:
             resolved_keys.append(SHIFT_MAP[base_name])
 
-        # (3) 제어키 조합 (예: ctrl+1, ctrl+c, alt+f4)
         mods = []
+        if is_cmd: mods.append("cmd")  # ★ macOS 우선순위
         if is_ctrl: mods.append("ctrl")
         if is_alt: mods.append("alt")
         if is_shift and not (is_shift and base_name in SHIFT_MAP):
@@ -113,11 +114,9 @@ def on_key_press(key):
         if mods and base_name:
             resolved_keys.append("+".join(mods) + "+" + base_name)
 
-        # (4) 베이스 키 단독
         if base_name:
             resolved_keys.append(base_name)
 
-        # 중복 제거 후 파이프 결합
         payload = "|".join(dict.fromkeys(resolved_keys))
         input_bridge.key_pressed.emit(payload)
 
@@ -132,6 +131,8 @@ def on_key_release(key):
             active_modifiers.discard("ctrl")
         elif key in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
             active_modifiers.discard("alt")
+        elif key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):
+            active_modifiers.discard("cmd")
     except Exception:
         pass
 

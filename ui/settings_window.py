@@ -74,10 +74,16 @@ class SettingsWindow(QWidget):
         self.click_through_cb.setChecked(config_mgr.settings.get("click_through", False))
         self.click_through_cb.toggled.connect(self.toggle_click_through)
 
+        # 화면 밖 이탈 방지 체크박스
+        self.clamp_cb = QCheckBox()
+        self.clamp_cb.setChecked(config_mgr.settings.get("clamp_to_screen", True))
+        self.clamp_cb.toggled.connect(self.toggle_clamp_screen)
+
         gen_layout.addWidget(self.lang_label)
         gen_layout.addWidget(self.lang_combo)
         gen_layout.addWidget(self.tray_cb)
         gen_layout.addWidget(self.click_through_cb)
+        gen_layout.addWidget(self.clamp_cb)
         gen_layout.addStretch()
         
         # ==================== 2. 사운드 탭 ====================
@@ -250,6 +256,7 @@ class SettingsWindow(QWidget):
         self.lang_label.setText(I18n.tr("language"))
         self.tray_cb.setText(I18n.tr("tray_mode"))
         self.click_through_cb.setText(I18n.tr("click_through"))
+        self.clamp_cb.setText(I18n.tr("clamp_to_screen"))
         self.add_pet_btn.setText(I18n.tr("add_pet"))
 
         self.skin_select_box.setTitle(I18n.tr("current_skin"))
@@ -276,7 +283,6 @@ class SettingsWindow(QWidget):
         self.btn_import.setText(I18n.tr("import_skin"))
         self.btn_export.setText(I18n.tr("export_skin"))
 
-    # ==================== 스킨 편집기 로직 ====================
     def load_skin_list(self):
         os.makedirs(SKINS_DIR, exist_ok=True)
         skins = [d for d in os.listdir(SKINS_DIR) if os.path.isdir(os.path.join(SKINS_DIR, d))]
@@ -323,7 +329,6 @@ class SettingsWindow(QWidget):
         self.is_loading_skin = False
 
     def save_current_skin_to_file(self):
-        """UI의 입력값을 읽어 config.json에 저장하고 펫들에게 즉시 전파"""
         if self.is_loading_skin:
             return
 
@@ -338,14 +343,11 @@ class SettingsWindow(QWidget):
             img_widget = self.mapping_table.cellWidget(r, 1)
             
             if isinstance(key_widget, KeyCaptureButton) and isinstance(img_widget, QLineEdit):
-                # 캡처 버튼의 텍스트를 정확하게 추출 (공백 제거)
                 k = key_widget.text().strip()
                 img = img_widget.text().strip()
                 
-                # 임시 안내 문구 및 빈 값 필터링
                 is_placeholder = any(tag in k for tag in ["대기", "감지", "Wait", "Detecting", "..."])
                 if k and img and not is_placeholder:
-                    # 특수문자(!, ?, @ 등)는 원본 그대로 유지, 일반 영문/단축키는 소문자화
                     clean_k = k.lower() if not any(c in "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./" for c in k) else k
                     mappings[clean_k] = img
 
@@ -359,9 +361,6 @@ class SettingsWindow(QWidget):
         
         self.skin_data = save_dict
         config_mgr.save_skin_config(self.current_editing_skin, save_dict)
-        print(f"[Settings] Successfully saved '{self.current_editing_skin}' config: {mappings}")
-        
-        # 활성 펫들에게 즉시 재로드 시그널 전달
         self.settings_changed.emit()
 
     def on_squash_changed(self, value):
@@ -415,7 +414,6 @@ class SettingsWindow(QWidget):
         self.mapping_table.insertRow(row)
 
         btn_key = KeyCaptureButton(key_text or I18n.tr("input_waiting"))
-        # 키 캡처 완료 시 즉각 버튼 텍스트를 확정하고 저장 트리거 실행
         btn_key.keyCaptured.connect(lambda captured: self.on_key_captured_in_row(btn_key, captured))
         self.mapping_table.setCellWidget(row, 0, btn_key)
 
@@ -441,7 +439,6 @@ class SettingsWindow(QWidget):
             self.mapping_table.removeRow(r)
             self.save_current_skin_to_file()
 
-    # ==================== 일반/사운드/펫 관리 핸들러 ====================
     def change_language(self, index):
         lang_code = self.lang_combo.itemData(index)
         if lang_code:
@@ -459,6 +456,10 @@ class SettingsWindow(QWidget):
         config_mgr.save_global_settings()
         self.settings_changed.emit()
 
+    def toggle_clamp_screen(self, checked):
+        config_mgr.settings["clamp_to_screen"] = checked
+        config_mgr.save_global_settings()
+
     def add_pet(self):
         new_pet = {"id": str(uuid.uuid4()), "skin": self.current_editing_skin, "scale": 1.0, "x": 150, "y": 150}
         config_mgr.settings["instances"].append(new_pet)
@@ -467,12 +468,12 @@ class SettingsWindow(QWidget):
         self.settings_changed.emit()
 
     def remove_pet(self, widget):
-        if len(config_mgr.settings["instances"]) <= 1:
-            return
-        config_mgr.settings["instances"].remove(widget.instance_data)
-        config_mgr.save_global_settings()
-        self.refresh_pet_list()
-        self.settings_changed.emit()
+        # 0마리까지 완전 삭제 지원
+        if widget.instance_data in config_mgr.settings["instances"]:
+            config_mgr.settings["instances"].remove(widget.instance_data)
+            config_mgr.save_global_settings()
+            self.refresh_pet_list()
+            self.settings_changed.emit()
 
     def refresh_pet_list(self):
         while self.pet_grid.count():
@@ -497,6 +498,9 @@ class SettingsWindow(QWidget):
     def update_pet_card_scale(self, pet_id, scale_val):
         if pet_id in self.pet_cards:
             self.pet_cards[pet_id].sync_scale_from_external(scale_val)
+            inst = next((i for i in config_mgr.settings["instances"] if i.get("id") == pet_id), None)
+            if inst:
+                self.pet_cards[pet_id].sync_skin(inst.get("skin", "default"))
 
     def import_skin(self):
         path, _ = QFileDialog.getOpenFileName(self, I18n.tr("open_skin_zip"), "", I18n.tr("zip_filter"))

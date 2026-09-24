@@ -81,6 +81,7 @@ class ConfigManager:
             "tray_mode": False,
             "click_through": False,
             "lock_position": False,
+            "clamp_to_screen": True,  # ★ 화면 밖 탈출 방지 옵션 (기본 활성화)
             "key_sound_enabled": True,
             "key_volume": 50,
             "key_preset": "preset_default",
