@@ -168,7 +168,9 @@ class AppController:
                 remove_callback=self.remove_pet_instance,
                 get_total_pets_callback=lambda: len(self.active_pets)
             )
-            # 펫 윈도우 자체에도 아이콘 지정
+            # 스킨 리소스를 강제로 새로고침
+            pet.load_resources()
+            
             if not self.app_icon.isNull():
                 pet.setWindowIcon(self.app_icon)
             pet.scale_changed.connect(self.settings_win.update_pet_card_scale)
@@ -178,6 +180,9 @@ class AppController:
         self.click_action.setChecked(config_mgr.settings.get("click_through", False))
 
     def route_input(self, key_name):
+        # 디버그: 실제로 어떤 키가 입력으로 들어오는지 터미널에 출력
+        # print(f"[Input Detected] -> {key_name}")
+        
         if key_name.startswith("mouse_"):
             sound_mgr.play_click()
         else:

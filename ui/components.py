@@ -12,8 +12,40 @@ from core.config_manager import config_mgr, SKINS_DIR, ASSETS_DIR
 from core.sound_manager import sound_mgr, scan_sound_files
 from core.i18n import I18n
 
+QT_SHIFT_MAP = {
+    '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+    '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+    ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~'
+}
+
+# Qt 고유 Key Enum 특수기호 매핑 (event.text()가 빈 문자열일 때 대비)
+QT_SPECIAL_KEYS = {
+    Qt.Key.Key_Exclam: "!",
+    Qt.Key.Key_At: "@",
+    Qt.Key.Key_NumberSign: "#",
+    Qt.Key.Key_Dollar: "$",
+    Qt.Key.Key_Percent: "%",
+    Qt.Key.Key_AsciiCircum: "^",
+    Qt.Key.Key_Ampersand: "&",
+    Qt.Key.Key_Asterisk: "*",
+    Qt.Key.Key_ParenLeft: "(",
+    Qt.Key.Key_ParenRight: ")",
+    Qt.Key.Key_Underscore: "_",
+    Qt.Key.Key_Plus: "+",
+    Qt.Key.Key_BraceLeft: "{",
+    Qt.Key.Key_BraceRight: "}",
+    Qt.Key.Key_Bar: "|",
+    Qt.Key.Key_Colon: ":",
+    Qt.Key.Key_QuoteDbl: '"',
+    Qt.Key.Key_Less: "<",
+    Qt.Key.Key_Greater: ">",
+    Qt.Key.Key_Question: "?",
+    Qt.Key.Key_AsciiTilde: "~"
+}
+
 class KeyCaptureButton(QPushButton):
-    """단일 키, 조합 키(Shift+1 등), 기호(!, ? 등), 마우스 입력을 정밀 캡처하는 버튼"""
+    """단일 키, 조합 키, 특수 기호(!, ? 등), 마우스 입력을 일관되게 캡처하는 버튼"""
     keyCaptured = pyqtSignal(str)
 
     def __init__(self, text="", parent=None):
@@ -57,15 +89,99 @@ class KeyCaptureButton(QPushButton):
         key = event.key()
         modifiers = event.modifiers()
 
-        # 제어키 단독 입력 중일 때는 대기 유지
+        # Shift, Ctrl, Alt 등 제어키 단독 입력 시 대기 유지
         if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
             event.accept()
             return
 
-        # 1. 텍스트 기호 우선 추출 (!, ?, @ 등)
+        text = event.text().strip()
+        is_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        is_ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+
+        final_key = None
+
+        # 1. Qt 고유 특수문자 Key Enum 확인
+        if key in QT_SPECIAL_KEYS:
+            final_key = QT_SPECIAL_KEYS[key]
+
+        # 2. 실제로 타이핑되어 나온 문자가 기호인 경우
+        elif text and text in "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./":
+            final_key = text
+
+        # 3. Shift가 눌려있고 숫자가 눌린 경우 (Shift + 1 -> !)
+        elif is_shift:
+            # 0~9 키 또는 문자
+            char_guess = chr(key).lower() if (32 <= key <= 126) else text.lower()
+            if char_guess in QT_SHIFT_MAP:
+                final_key = QT_SHIFT_MAP[char_guess]
+
+        # 4. 특수문자가 아닌 일반 키 또는 조합 키 처리
+        if not final_key:
+            key_names = {
+                Qt.Key.Key_Space: "space",
+                Qt.Key.Key_Return: "enter",
+                Qt.Key.Key_Enter: "enter",
+                Qt.Key.Key_Tab: "tab",
+                Qt.Key.Key_Backspace: "backspace",
+                Qt.Key.Key_Escape: "esc",
+                Qt.Key.Key_Left: "left",
+                Qt.Key.Key_Right: "right",
+                Qt.Key.Key_Up: "up",
+                Qt.Key.Key_Down: "down"
+            }
+            base = key_names.get(key, text.lower() if text else f"key_{key}")
+
+            mod_parts = []
+            if is_ctrl: mod_parts.append("ctrl")
+            if is_alt: mod_parts.append("alt")
+            if is_shift: mod_parts.append("shift")
+
+            if mod_parts:
+                final_key = "+".join(mod_parts) + "+" + base
+            else:
+                final_key = base
+
+        # 캡처 완료 처리
+        self.setText(final_key)
+        self.capturing = False
+        self.setProperty("activeCapture", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.keyCaptured.emit(final_key)
+        event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if not self.capturing:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # Shift, Ctrl, Alt, Meta 단독 입력 중일 때는 대기 상태 유지
+        if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            event.accept()
+            return
+
+        # 1. 사용자가 누른 키로 인해 실제로 생성된 텍스트 확인
         text = event.text().strip()
 
-        # 2. 베이스 키 매핑
+        # ★ 2. 특수문자 최우선 감지 (!, ?, @, #, $, %, ^, &, *, ~, 등)
+        # Shift 조합으로 타이핑된 특수문자는 modifiers 표기 없이 기호 자체를 감지값으로 확정
+        symbols = "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./"
+        if text and text in symbols:
+            final_name = text
+            self.setText(final_name)
+            self.capturing = False
+            self.setProperty("activeCapture", False)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.keyCaptured.emit(final_name)
+            event.accept()
+            return
+
+        # 3. 특수 기능 키 매핑
         key_map = {
             Qt.Key.Key_Space: "space",
             Qt.Key.Key_Return: "enter",
@@ -80,29 +196,26 @@ class KeyCaptureButton(QPushButton):
         }
         base_name = key_map.get(key, text.lower() if text else f"key_{key}")
 
-        # 3. 수정자 키 접두사 구성
+        # 4. Ctrl, Alt 조합 키 접두사 구성 (Shift는 기호가 아닌 영문 대문자/단축키일 때만 포함)
         mod_parts = []
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             mod_parts.append("ctrl")
         if modifiers & Qt.KeyboardModifier.AltModifier:
             mod_parts.append("alt")
-        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+        if modifiers & Qt.KeyboardModifier.ShiftModifier and not text:
             mod_parts.append("shift")
 
-        # 4. 최종 등록 키 결정 (기호 자체를 우선시, 필요 시 조합 표기)
-        if text and text in "!@#$%^&*()_+{}|:\"<>?~`":
-            k_name = text
-        elif mod_parts:
-            k_name = "+".join(mod_parts) + "+" + base_name
+        if mod_parts:
+            final_name = "+".join(mod_parts) + "+" + base_name
         else:
-            k_name = base_name
+            final_name = base_name
 
-        self.setText(k_name)
+        self.setText(final_name)
         self.capturing = False
         self.setProperty("activeCapture", False)
         self.style().unpolish(self)
         self.style().polish(self)
-        self.keyCaptured.emit(k_name)
+        self.keyCaptured.emit(final_name)
         event.accept()
 
 

@@ -59,15 +59,70 @@ class PetWidget(QWidget):
         self.idle_pixmap = QPixmap(os.path.join(s_dir, skin_conf.get("idle_image", "idle.png")))
         self.tap_pixmaps = [QPixmap(os.path.join(s_dir, p)) for p in skin_conf.get("tap_images", ["tap_left.png", "tap_right.png"])]
         
-        # 키 매핑 픽스맵 캐싱 (대소문자 무관 비교를 위해 소문자화)
+        # 키 매핑 픽스맵 캐싱 (공백 제거 및 대소문자 방어)
         self.cached_pixmaps = {}
         for k, v in self.key_mappings.items():
-            self.cached_pixmaps[k.lower()] = QPixmap(os.path.join(s_dir, v))
+            img_path = os.path.join(s_dir, v)
+            if os.path.exists(img_path):
+                pix = QPixmap(img_path)
+                clean_k = str(k).strip()
+                self.cached_pixmaps[clean_k] = pix
+                self.cached_pixmaps[clean_k.lower()] = pix
 
         self.current_pixmap = self.idle_pixmap
         self.update_widget_size()
         self.update()
 
+    def trigger_bounce(self, key_payload):
+        now = time.time()
+        self.hit_times.append(now)
+        apm = 0
+        if len(self.hit_times) > 1:
+            dt = now - self.hit_times[0]
+            if dt > 0:
+                apm = (len(self.hit_times) / dt) * 60
+
+        # 후보 분리 (예: ["!", "shift+1", "1"])
+        candidates = [c.strip() for c in key_payload.split("|") if c.strip()]
+        
+        matched_pixmap = None
+        matched_key = None
+
+        # 1. 스킨 매핑 테이블에서 일치하는 키 검색
+        for cand in candidates:
+            if cand in self.cached_pixmaps:
+                matched_pixmap = self.cached_pixmaps[cand]
+                matched_key = cand
+                break
+            if cand.lower() in self.cached_pixmaps:
+                matched_pixmap = self.cached_pixmaps[cand.lower()]
+                matched_key = cand.lower()
+                break
+
+        # 2. 이미지 교체 결정
+        if matched_pixmap and not matched_pixmap.isNull():
+            self.current_pixmap = matched_pixmap
+            # (디버그 확인용 출력)
+            print(f"[Pet] Matched Custom Key: '{matched_key}' -> Custom Image Displayed")
+        elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
+            self.current_pixmap = self.cached_pixmaps["mouse_click"]
+        else:
+            if self.tap_pixmaps:
+                self.current_pixmap = self.tap_pixmaps[self.tap_index]
+                self.tap_index = (self.tap_index + 1) % len(self.tap_pixmaps)
+
+        extra_squash = min(apm / 600.0, 1.0) * 0.08
+        actual_depth = min(self.squash_depth + extra_squash, 0.75)
+
+        self.scale_y = max(0.20, 1.0 - actual_depth)
+        self.scale_x = 1.0 + (actual_depth * 0.5)
+
+        # 특수 매핑 이미지의 경우 표정이 보이도록 idle 복귀 시간을 살짝 넉넉하게 220ms 부여
+        reset_ms = 240 if matched_pixmap else 160
+        self.reset_timer.start(reset_ms)
+        self.anim_timer.start(16)
+        self.update()
+        
     def update_widget_size(self):
         if not self.idle_pixmap.isNull():
             orig_w = self.idle_pixmap.width()
@@ -142,7 +197,7 @@ class PetWidget(QWidget):
         elif chosen == exit_action:
             QApplication.quit()
 
-    def trigger_bounce(self, key_name):
+    def trigger_bounce(self, key_payload):
         now = time.time()
         self.hit_times.append(now)
         apm = 0
@@ -151,18 +206,24 @@ class PetWidget(QWidget):
             if dt > 0:
                 apm = (len(self.hit_times) / dt) * 60
 
-        # 다중 후보 분리 (예: "!|shift+1" -> ["!", "shift+1"])
-        candidates = [c.strip().lower() for c in key_name.split("|")]
+        # 후보군 분리 (예: ["!", "shift+1", "1"])
+        candidates = [c.strip() for c in key_payload.split("|")]
         
         matched_pixmap = None
         for cand in candidates:
+            # 1. 대소문자 일치 검사
             if cand in self.cached_pixmaps and not self.cached_pixmaps[cand].isNull():
                 matched_pixmap = self.cached_pixmaps[cand]
+                break
+            # 2. 소문자 일치 검사
+            cand_lower = cand.lower()
+            if cand_lower in self.cached_pixmaps and not self.cached_pixmaps[cand_lower].isNull():
+                matched_pixmap = self.cached_pixmaps[cand_lower]
                 break
 
         if matched_pixmap:
             self.current_pixmap = matched_pixmap
-        elif key_name.startswith("mouse_") and "mouse_click" in self.cached_pixmaps:
+        elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
             self.current_pixmap = self.cached_pixmaps["mouse_click"]
         else:
             if self.tap_pixmaps:
@@ -175,7 +236,7 @@ class PetWidget(QWidget):
         self.scale_y = max(0.20, 1.0 - actual_depth)
         self.scale_x = 1.0 + (actual_depth * 0.5)
 
-        self.reset_timer.start(160)
+        self.reset_timer.start(180)
         self.anim_timer.start(16)
         self.update()
 

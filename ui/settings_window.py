@@ -323,6 +323,7 @@ class SettingsWindow(QWidget):
         self.is_loading_skin = False
 
     def save_current_skin_to_file(self):
+        """UI의 입력값을 읽어 config.json에 저장하고 펫들에게 즉시 전파"""
         if self.is_loading_skin:
             return
 
@@ -335,11 +336,18 @@ class SettingsWindow(QWidget):
         for r in range(self.mapping_table.rowCount()):
             key_widget = self.mapping_table.cellWidget(r, 0)
             img_widget = self.mapping_table.cellWidget(r, 1)
+            
             if isinstance(key_widget, KeyCaptureButton) and isinstance(img_widget, QLineEdit):
-                k = key_widget.text().strip().lower()
+                # 캡처 버튼의 텍스트를 정확하게 추출 (공백 제거)
+                k = key_widget.text().strip()
                 img = img_widget.text().strip()
-                if k and img and "대기" not in k and "감지" not in k and "Wait" not in k:
-                    mappings[k] = img
+                
+                # 임시 안내 문구 및 빈 값 필터링
+                is_placeholder = any(tag in k for tag in ["대기", "감지", "Wait", "Detecting", "..."])
+                if k and img and not is_placeholder:
+                    # 특수문자(!, ?, @ 등)는 원본 그대로 유지, 일반 영문/단축키는 소문자화
+                    clean_k = k.lower() if not any(c in "!@#$%^&*()_+{}|:\"<>?~`-=[]\\;',./" for c in k) else k
+                    mappings[clean_k] = img
 
         save_dict = {
             "name": self.current_editing_skin,
@@ -348,8 +356,12 @@ class SettingsWindow(QWidget):
             "tap_images": [t1, t2],
             "key_mappings": mappings
         }
+        
         self.skin_data = save_dict
         config_mgr.save_skin_config(self.current_editing_skin, save_dict)
+        print(f"[Settings] Successfully saved '{self.current_editing_skin}' config: {mappings}")
+        
+        # 활성 펫들에게 즉시 재로드 시그널 전달
         self.settings_changed.emit()
 
     def on_squash_changed(self, value):
@@ -403,7 +415,8 @@ class SettingsWindow(QWidget):
         self.mapping_table.insertRow(row)
 
         btn_key = KeyCaptureButton(key_text or I18n.tr("input_waiting"))
-        btn_key.keyCaptured.connect(lambda _: self.save_current_skin_to_file())
+        # 키 캡처 완료 시 즉각 버튼 텍스트를 확정하고 저장 트리거 실행
+        btn_key.keyCaptured.connect(lambda captured: self.on_key_captured_in_row(btn_key, captured))
         self.mapping_table.setCellWidget(row, 0, btn_key)
 
         line_edit = QLineEdit(img_text)
@@ -413,6 +426,10 @@ class SettingsWindow(QWidget):
         pick_btn = QPushButton(I18n.tr("col_browse"))
         pick_btn.clicked.connect(lambda _, le=line_edit: self.browse_image_for(le))
         self.mapping_table.setCellWidget(row, 2, pick_btn)
+
+    def on_key_captured_in_row(self, button_widget: KeyCaptureButton, captured_key: str):
+        button_widget.setText(captured_key)
+        self.save_current_skin_to_file()
 
     def add_mapping_row(self):
         self.insert_mapping_row("space", "tap_left.png")
@@ -458,7 +475,6 @@ class SettingsWindow(QWidget):
         self.settings_changed.emit()
 
     def refresh_pet_list(self):
-        """3열(3×N) 동적 그리드 형태로 펫 카드 재배치"""
         while self.pet_grid.count():
             item = self.pet_grid.takeAt(0)
             w = item.widget()
@@ -479,7 +495,6 @@ class SettingsWindow(QWidget):
                 self.pet_cards[p_id] = card
 
     def update_pet_card_scale(self, pet_id, scale_val):
-        """Ctrl+휠 등으로 펫 크기가 바뀌었을 때 해당 카드의 슬라이더/스핀박스 동기화"""
         if pet_id in self.pet_cards:
             self.pet_cards[pet_id].sync_scale_from_external(scale_val)
 

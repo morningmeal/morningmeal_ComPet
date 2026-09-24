@@ -10,22 +10,23 @@ class InputListenerBridge(QObject):
 
 input_bridge = InputListenerBridge()
 
-# 현재 눌려있는 제어 키(Modifier) 추적용
+# 현재 눌려있는 제어 키 추적
 active_modifiers = set()
 
+SHIFT_MAP = {
+    '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+    '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+    ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~'
+}
+
 def check_mac_accessibility():
-    """macOS 환경에서 손쉬운 사용(Accessibility) 권한을 확인하고 시스템 다이얼로그 호출"""
     if sys.platform != 'darwin':
         return True
     try:
-        # ApplicationServices 프레임워크 로드
         app_services = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
-        # AXIsProcessTrustedWithOptions 호출을 위한 사전 파라미터 구성
-        # kAXTrustedCheckOptionPrompt = True 키 전달 시 시스템 권한 허용 팝업이 뜸
         is_trusted = app_services.AXIsProcessTrusted()
         if not is_trusted:
-            print("[InputListener] macOS Accessibility permission is NOT granted. Requesting prompt...")
-            # 권한 프롬프트 자동 유도
             try:
                 from Foundation import NSDictionary
                 options = NSDictionary.dictionaryWithObject_forKey_(True, "AXTrustedCheckOptionPrompt")
@@ -33,23 +34,34 @@ def check_mac_accessibility():
             except Exception:
                 pass
         return bool(is_trusted)
-    except Exception as e:
-        print(f"[InputListener] Failed to check macOS accessibility: {e}")
+    except Exception:
         return False
 
-def get_modifier_prefix():
-    parts = []
-    if "ctrl" in active_modifiers:
-        parts.append("ctrl")
-    if "alt" in active_modifiers:
-        parts.append("alt")
-    if "shift" in active_modifiers:
-        parts.append("shift")
-    return "+".join(parts)
+def normalize_key_token(token):
+    """<49> 같은 Windows 가상 키코드를 실제 문자 '1' 등으로 복원"""
+    if not token:
+        return ""
+    token_str = str(token).strip()
+    
+    # <49> 형태의 문자열 처리
+    if token_str.startswith("<") and token_str.endswith(">"):
+        inner = token_str[1:-1]
+        if inner.isdigit():
+            vk = int(inner)
+            # 숫자 0~9 (ASCII 48~57)
+            if 48 <= vk <= 57:
+                return chr(vk)
+            # 알파벳 A~Z (ASCII 65~90)
+            elif 65 <= vk <= 90:
+                return chr(vk).lower()
+            # 넘패드 0~9 (VK_NUMPAD0 96 ~ VK_NUMPAD9 105)
+            elif 96 <= vk <= 105:
+                return str(vk - 96)
+    return token_str.lower()
 
 def on_key_press(key):
     try:
-        # 1. 특수키 및 제어키 상태 추적
+        # 1. 제어 키 상태 업데이트
         if key in (keyboard.Key.shift, keyboard.Key.shift_r, keyboard.Key.shift_l):
             active_modifiers.add("shift")
             return
@@ -60,32 +72,57 @@ def on_key_press(key):
             active_modifiers.add("alt")
             return
 
-        # 2. 키 이름 식별
-        char_key = None
+        is_shift = "shift" in active_modifiers
+        is_ctrl = "ctrl" in active_modifiers
+        is_alt = "alt" in active_modifiers
+
+        # 2. 키 이름 추출 및 가상 키코드 복원
+        char_val = getattr(key, 'char', None)
         base_name = None
 
-        if hasattr(key, 'char') and key.char:
-            char_key = key.char
-            base_name = key.char.lower()
-        else:
-            base_name = key.name.lower() if hasattr(key, 'name') else str(key).lower()
-
-        mod_prefix = get_modifier_prefix()
-
-        # 3. 조합 키 문자열 구성
-        if mod_prefix:
-            combo_name = f"{mod_prefix}+{base_name}"
-            if char_key and char_key not in (base_name, f"key_{base_name}"):
-                final_key = f"{char_key}|{combo_name}"
+        if char_val is not None:
+            raw_char = str(char_val)
+            # Ctrl+키 조합 시 발생하는 제어문자(ASCII 1~26) 처리 (예: Ctrl+A -> \x01)
+            if len(raw_char) == 1 and ord(raw_char) < 32:
+                base_name = chr(ord(raw_char) + 96).lower()
             else:
-                final_key = combo_name
+                base_name = raw_char.lower()
         else:
-            final_key = char_key if char_key else base_name
+            raw_name = getattr(key, 'name', str(key))
+            clean_name = str(raw_name).replace("Key.", "").replace("key.", "")
+            base_name = normalize_key_token(clean_name)
 
-        input_bridge.key_pressed.emit(final_key)
+        # 3. 키 후보군 도출 (우선순위 순서대로 배열)
+        resolved_keys = []
+
+        # (1) 특수문자(!, ? 등) 직접 타이핑된 경우
+        if char_val and char_val in "!@#$%^&*()_+{}|:\"<>?~":
+            resolved_keys.append(char_val)
+
+        # (2) Shift + 숫자/기호인 경우 (예: Shift + 1 -> !)
+        if is_shift and base_name in SHIFT_MAP:
+            resolved_keys.append(SHIFT_MAP[base_name])
+
+        # (3) 제어키 조합 (예: ctrl+1, ctrl+c, alt+f4)
+        mods = []
+        if is_ctrl: mods.append("ctrl")
+        if is_alt: mods.append("alt")
+        if is_shift and not (is_shift and base_name in SHIFT_MAP):
+            mods.append("shift")
+
+        if mods and base_name:
+            resolved_keys.append("+".join(mods) + "+" + base_name)
+
+        # (4) 베이스 키 단독
+        if base_name:
+            resolved_keys.append(base_name)
+
+        # 중복 제거 후 파이프 결합
+        payload = "|".join(dict.fromkeys(resolved_keys))
+        input_bridge.key_pressed.emit(payload)
 
     except Exception as e:
-        print(f"[InputListener] Key error: {e}")
+        print(f"[InputListener] Error: {e}")
 
 def on_key_release(key):
     try:
@@ -111,25 +148,16 @@ def on_click(x, y, button, pressed):
         input_bridge.key_pressed.emit(b_name)
 
 def start_global_listener():
-    # macOS의 경우 접근성 권한 상태 먼저 체크
     if sys.platform == 'darwin':
         check_mac_accessibility()
 
     def run_keyboard():
-        try:
-            with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as listener:
-                listener.join()
-        except Exception as e:
-            print(f"[InputListener] Keyboard listener crashed: {e}")
+        with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as listener:
+            listener.join()
 
     def run_mouse():
-        try:
-            with mouse.Listener(on_click=on_click) as listener:
-                listener.join()
-        except Exception as e:
-            print(f"[InputListener] Mouse listener crashed: {e}")
+        with mouse.Listener(on_click=on_click) as listener:
+            listener.join()
 
-    t_kb = threading.Thread(target=run_keyboard, daemon=True)
-    t_ms = threading.Thread(target=run_mouse, daemon=True)
-    t_kb.start()
-    t_ms.start()
+    threading.Thread(target=run_keyboard, daemon=True).start()
+    threading.Thread(target=run_mouse, daemon=True).start()
