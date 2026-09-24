@@ -43,6 +43,62 @@ QT_SPECIAL_KEYS = {
     Qt.Key.Key_AsciiTilde: "~"
 }
 
+class CustomTitleBar(QWidget):
+    theme_toggled = pyqtSignal()
+
+    def __init__(self, parent_window, title="morningmeal_Compet"):
+        super().__init__(parent_window)
+        self.parent_window = parent_window
+        self.setObjectName("titleBar")
+        self.setFixedHeight(38)
+        self.drag_start_pos = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 8, 0)
+        layout.setSpacing(8)
+
+        # 윈도우 타이틀
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("titleLabel")
+        layout.addWidget(self.title_label)
+
+        layout.addStretch()
+
+        # 테마 전환 버튼 (Light / Dark)
+        self.theme_btn = QPushButton("Mode")
+        self.theme_btn.setObjectName("titleBtn")
+        self.theme_btn.setFixedSize(50, 24)
+        self.theme_btn.clicked.connect(self.theme_toggled.emit)
+        layout.addWidget(self.theme_btn)
+
+        # 최소화 버튼
+        self.min_btn = QPushButton("–")
+        self.min_btn.setObjectName("titleBtn")
+        self.min_btn.setFixedSize(28, 24)
+        self.min_btn.clicked.connect(self.parent_window.showMinimized)
+        layout.addWidget(self.min_btn)
+
+        # 닫기 버튼
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setObjectName("titleCloseBtn")
+        self.close_btn.setFixedSize(28, 24)
+        self.close_btn.clicked.connect(self.parent_window.hide)
+        layout.addWidget(self.close_btn)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_start_pos = event.globalPosition().toPoint() - self.parent_window.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.drag_start_pos and event.buttons() == Qt.MouseButton.LeftButton:
+            self.parent_window.move(event.globalPosition().toPoint() - self.drag_start_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self.drag_start_pos = None
+        event.accept()
+
 class KeyCaptureButton(QPushButton):
     """단일 키, 조합 키, 특수 기호(!, ? 등), 마우스 입력을 일관되게 캡처하는 버튼"""
     keyCaptured = pyqtSignal(str)

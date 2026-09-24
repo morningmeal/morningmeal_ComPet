@@ -8,38 +8,117 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QPushButton, QLabel, QMessageBox, QFileDialog,
     QGroupBox, QSlider, QLineEdit, QTableWidget, QHeaderView, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QPoint
+from PyQt6.QtGui import QDesktopServices, QMouseEvent
 from core.i18n import I18n
 from core.config_manager import config_mgr, SKINS_DIR
-from ui.theme import LIGHT_THEME
+from ui.theme import LIGHT_THEME, DARK_THEME
 from ui.components import PetCardWidget, SoundControlWidget, KeyCaptureButton
+
+
+class CustomTitleBar(QWidget):
+    """창 이동, 테마 토글, 최소화 및 닫기 기능을 지원하는 커스텀 상단 타이틀바"""
+    theme_toggled = pyqtSignal()
+
+    def __init__(self, parent_window, title="morningmeal_Compet"):
+        super().__init__(parent_window)
+        self.parent_window = parent_window
+        self.setObjectName("titleBar")
+        self.setFixedHeight(40)
+        self.drag_start_pos = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 0, 10, 0)
+        layout.setSpacing(8)
+
+        # 프로그램 타이틀 라벨
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("titleLabel")
+        layout.addWidget(self.title_label)
+
+        layout.addStretch()
+
+        # 테마 전환 버튼 (Light / Dark)
+        self.theme_btn = QPushButton("Mode")
+        self.theme_btn.setObjectName("titleBtn")
+        self.theme_btn.setFixedSize(54, 24)
+        self.theme_btn.clicked.connect(self.theme_toggled.emit)
+        layout.addWidget(self.theme_btn)
+
+        # 최소화 버튼
+        self.min_btn = QPushButton("–")
+        self.min_btn.setObjectName("titleBtn")
+        self.min_btn.setFixedSize(28, 24)
+        self.min_btn.clicked.connect(self.parent_window.showMinimized)
+        layout.addWidget(self.min_btn)
+
+        # 닫기 버튼
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setObjectName("titleCloseBtn")
+        self.close_btn.setFixedSize(28, 24)
+        self.close_btn.clicked.connect(self.parent_window.hide)
+        layout.addWidget(self.close_btn)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_start_pos = event.globalPosition().toPoint() - self.parent_window.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.drag_start_pos and event.buttons() == Qt.MouseButton.LeftButton:
+            self.parent_window.move(event.globalPosition().toPoint() - self.drag_start_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self.drag_start_pos = None
+        event.accept()
+
 
 class SettingsWindow(QWidget):
     settings_changed = pyqtSignal()
     
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.Window)
-        self.setFixedWidth(540)
+        # OS 기본 타이틀바를 제거하고 커스텀 프레임리스 윈도우 구성
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedWidth(560)
         self.setMinimumHeight(680)
-        self.setStyleSheet(LIGHT_THEME)
         
         self.current_editing_skin = "default"
         self.skin_data = {}
         self.is_loading_skin = False
-        self.pet_cards = {}  # {pet_id: PetCardWidget}
+        self.pet_cards = {}
+        self.is_dark_mode = config_mgr.settings.get("dark_mode", False)
 
         self.init_ui()
+        self.apply_theme()
         self.load_skin_list()
         self.load_current_skin_config()
         self.retranslate_ui()
         I18n.language_changed.connect(self.retranslate_ui)
 
     def init_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+        # 최외곽 배경 레이아웃 (둥근 테두리 및 섀도우 지원)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
         
+        self.root_widget = QWidget()
+        self.root_widget.setObjectName("settingsRoot")
+        root_layout = QVBoxLayout(self.root_widget)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # 1. 커스텀 타이틀바
+        self.title_bar = CustomTitleBar(self, "morningmeal_Compet")
+        self.title_bar.theme_toggled.connect(self.toggle_theme)
+        root_layout.addWidget(self.title_bar)
+
+        # 2. 본문 컨텐츠 영역
+        content_container = QWidget()
+        content_layout = QVBoxLayout(content_container)
+        content_layout.setContentsMargins(16, 12, 16, 16)
+
         self.tabs = QTabWidget()
         
         # ==================== 1. 일반 설정 탭 ====================
@@ -74,7 +153,6 @@ class SettingsWindow(QWidget):
         self.click_through_cb.setChecked(config_mgr.settings.get("click_through", False))
         self.click_through_cb.toggled.connect(self.toggle_click_through)
 
-        # 화면 밖 이탈 방지 체크박스
         self.clamp_cb = QCheckBox()
         self.clamp_cb.setChecked(config_mgr.settings.get("clamp_to_screen", True))
         self.clamp_cb.toggled.connect(self.toggle_clamp_screen)
@@ -95,7 +173,7 @@ class SettingsWindow(QWidget):
         snd_layout.addWidget(self.click_sound_ctrl)
         snd_layout.addStretch()
 
-        # ==================== 3. 펫 관리 탭 (3×N 그리드) ====================
+        # ==================== 3. 펫 관리 탭 ====================
         self.tab_pets = QWidget()
         pets_layout = QVBoxLayout(self.tab_pets)
         pets_layout.setContentsMargins(10, 10, 10, 10)
@@ -128,7 +206,6 @@ class SettingsWindow(QWidget):
         skin_layout.setContentsMargins(10, 10, 10, 10)
         skin_layout.setSpacing(12)
 
-        # 4-1. 스킨 선택 / 생성 / 폴더 열기 바
         skin_select_box = QGroupBox()
         self.skin_select_box = skin_select_box
         ss_layout = QHBoxLayout(skin_select_box)
@@ -145,7 +222,6 @@ class SettingsWindow(QWidget):
         ss_layout.addWidget(self.btn_open_folder, 1)
         skin_layout.addWidget(skin_select_box)
 
-        # 4-2. 모션 압축 정도 (Squash Depth) 조절
         squash_box = QGroupBox()
         self.squash_box = squash_box
         squash_layout = QHBoxLayout(squash_box)
@@ -155,12 +231,10 @@ class SettingsWindow(QWidget):
         self.squash_slider.valueChanged.connect(self.on_squash_changed)
         self.squash_label = QLabel("20%")
         self.squash_label.setFixedWidth(50)
-        self.squash_label.setStyleSheet("font-weight: bold; color: #2563EB;")
         squash_layout.addWidget(self.squash_slider, 1)
         squash_layout.addWidget(self.squash_label)
         skin_layout.addWidget(squash_box)
 
-        # 4-3. 기본 이미지 파일 설정
         base_img_box = QGroupBox()
         self.base_img_box = base_img_box
         base_layout = QVBoxLayout(base_img_box)
@@ -200,7 +274,6 @@ class SettingsWindow(QWidget):
         base_layout.addLayout(h_tap2)
         skin_layout.addWidget(base_img_box)
 
-        # 4-4. 키 및 마우스 매핑 테이블
         mapping_box = QGroupBox()
         self.mapping_box = mapping_box
         map_layout = QVBoxLayout(mapping_box)
@@ -223,7 +296,6 @@ class SettingsWindow(QWidget):
         map_layout.addLayout(map_btn_layout)
         skin_layout.addWidget(mapping_box)
 
-        # 4-5. ZIP 패키지 관리
         pkg_box = QGroupBox()
         self.pkg_box = pkg_box
         pkg_layout = QHBoxLayout(pkg_box)
@@ -240,14 +312,31 @@ class SettingsWindow(QWidget):
         skin_main_layout.setContentsMargins(0, 0, 0, 0)
         skin_main_layout.addWidget(tab_skin_scroll)
 
+        # 탭 타이틀 (이모티콘 없이 간결하게 등록)
         self.tabs.addTab(self.tab_general, "")
         self.tabs.addTab(self.tab_sound, "")
         self.tabs.addTab(self.tab_pets, "")
         self.tabs.addTab(self.tab_skin, "")
-        main_layout.addWidget(self.tabs)
+        content_layout.addWidget(self.tabs)
+
+        root_layout.addWidget(content_container)
+        outer_layout.addWidget(self.root_widget)
+
+    def toggle_theme(self):
+        """다크 / 라이트 모드 전환"""
+        self.is_dark_mode = not self.is_dark_mode
+        config_mgr.settings["dark_mode"] = self.is_dark_mode
+        config_mgr.save_global_settings()
+        self.apply_theme()
+
+    def apply_theme(self):
+        theme = DARK_THEME if self.is_dark_mode else LIGHT_THEME
+        self.setStyleSheet(theme)
+        self.title_bar.theme_btn.setText("Light" if self.is_dark_mode else "Dark")
 
     def retranslate_ui(self):
-        self.setWindowTitle(I18n.tr("settings_title"))
+        # 타이틀바 및 탭 이름 번역 (이모티콘 없는 깔끔한 텍스트)
+        self.title_bar.title_label.setText(I18n.tr("settings_title"))
         self.tabs.setTabText(0, I18n.tr("tab_general"))
         self.tabs.setTabText(1, I18n.tr("tab_sound"))
         self.tabs.setTabText(2, I18n.tr("tab_pets"))
@@ -497,10 +586,10 @@ class SettingsWindow(QWidget):
 
     def update_pet_card_scale(self, pet_id, scale_val):
         if pet_id in self.pet_cards:
-            self.pet_cards[pet_id].sync_scale_from_external(scale_val)
+            self.pet_cards[pet_id].sync_scale_from_external(scale_val)[cite: 12, 14]
             inst = next((i for i in config_mgr.settings["instances"] if i.get("id") == pet_id), None)
             if inst:
-                self.pet_cards[pet_id].sync_skin(inst.get("skin", "default"))
+                self.pet_cards[pet_id].sync_skin(inst.get("skin", "default"))[cite: 12]
 
     def import_skin(self):
         path, _ = QFileDialog.getOpenFileName(self, I18n.tr("open_skin_zip"), "", I18n.tr("zip_filter"))
