@@ -222,15 +222,17 @@ class SettingsWindow(QWidget):
         ss_layout.addWidget(self.btn_open_folder, 1)
         skin_layout.addWidget(skin_select_box)
 
+        # ★ 1. 모션 압축 정도를 1% ~ 100% 범위로 조절할 수 있도록 설정
         squash_box = QGroupBox()
         self.squash_box = squash_box
         squash_layout = QHBoxLayout(squash_box)
         self.squash_slider = QSlider(Qt.Orientation.Horizontal)
-        self.squash_slider.setRange(10, 70)
+        self.squash_slider.setRange(1, 100)
         self.squash_slider.setValue(20)
         self.squash_slider.valueChanged.connect(self.on_squash_changed)
         self.squash_label = QLabel("20%")
         self.squash_label.setFixedWidth(50)
+        self.squash_label.setStyleSheet("font-weight: bold; color: #2563EB;")
         squash_layout.addWidget(self.squash_slider, 1)
         squash_layout.addWidget(self.squash_label)
         skin_layout.addWidget(squash_box)
@@ -274,6 +276,7 @@ class SettingsWindow(QWidget):
         base_layout.addLayout(h_tap2)
         skin_layout.addWidget(base_img_box)
 
+        # 4-4. 키 및 마우스 매핑 테이블
         mapping_box = QGroupBox()
         self.mapping_box = mapping_box
         map_layout = QVBoxLayout(mapping_box)
@@ -283,7 +286,8 @@ class SettingsWindow(QWidget):
         self.mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.mapping_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.mapping_table.verticalHeader().setVisible(False)
-        self.mapping_table.setMinimumHeight(160)
+        self.mapping_table.setMinimumHeight(170)
+        self.mapping_table.setShowGrid(False)
         map_layout.addWidget(self.mapping_table)
 
         map_btn_layout = QHBoxLayout()
@@ -312,7 +316,6 @@ class SettingsWindow(QWidget):
         skin_main_layout.setContentsMargins(0, 0, 0, 0)
         skin_main_layout.addWidget(tab_skin_scroll)
 
-        # 탭 타이틀 (이모티콘 없이 간결하게 등록)
         self.tabs.addTab(self.tab_general, "")
         self.tabs.addTab(self.tab_sound, "")
         self.tabs.addTab(self.tab_pets, "")
@@ -333,9 +336,56 @@ class SettingsWindow(QWidget):
         theme = DARK_THEME if self.is_dark_mode else LIGHT_THEME
         self.setStyleSheet(theme)
         self.title_bar.theme_btn.setText("Light" if self.is_dark_mode else "Dark")
+        # 테마 변경 시 테이블 내부 셀 위젯 스타일도 동기화 갱신
+        self.refresh_table_widgets_style()
+
+    def refresh_table_widgets_style(self):
+        """테이블 내부에 동적으로 추가된 셀 위젯들의 스타일을 현재 테마에 맞게 갱신"""
+        bg_btn = "#27272A" if self.is_dark_mode else "#F3F4F6"
+        border_btn = "#3F3F46" if self.is_dark_mode else "#E5E7EB"
+        text_btn = "#F4F4F5" if self.is_dark_mode else "#1F2937"
+        bg_input = "#27272A" if self.is_dark_mode else "#FFFFFF"
+        border_input = "#3F3F46" if self.is_dark_mode else "#D1D5DB"
+        text_input = "#F4F4F5" if self.is_dark_mode else "#111827"
+
+        btn_qss = f"""
+            QPushButton {{
+                background-color: {bg_btn};
+                border: 1px solid {border_btn};
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: {text_btn};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {"#3F3F46" if self.is_dark_mode else "#E5E7EB"};
+            }}
+        """
+        line_qss = f"""
+            QLineEdit {{
+                background-color: {bg_input};
+                border: 1px solid {border_input};
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: {text_input};
+            }}
+            QLineEdit:focus {{
+                border-color: {"#FAFAFA" if self.is_dark_mode else "#111827"};
+            }}
+        """
+
+        for r in range(self.mapping_table.rowCount()):
+            w0 = self.mapping_table.cellWidget(r, 0)
+            w1 = self.mapping_table.cellWidget(r, 1)
+            w2 = self.mapping_table.cellWidget(r, 2)
+            if w0 and not getattr(w0, 'capturing', False):
+                w0.setStyleSheet(btn_qss)
+            if w1:
+                w1.setStyleSheet(line_qss)
+            if w2:
+                w2.setStyleSheet(btn_qss)
 
     def retranslate_ui(self):
-        # 타이틀바 및 탭 이름 번역 (이모티콘 없는 깔끔한 텍스트)
         self.title_bar.title_label.setText(I18n.tr("settings_title"))
         self.tabs.setTabText(0, I18n.tr("tab_general"))
         self.tabs.setTabText(1, I18n.tr("tab_sound"))
@@ -399,9 +449,11 @@ class SettingsWindow(QWidget):
         self.is_loading_skin = True
         self.skin_data = config_mgr.get_skin_config(self.current_editing_skin)
 
+        # 1% ~ 100% 범위 대응
         squash_val = float(self.skin_data.get("squash_depth", 0.20))
-        self.squash_slider.setValue(int(squash_val * 100))
-        self.squash_label.setText(f"{int(squash_val * 100)}%")
+        val_pct = max(1, min(100, int(round(squash_val * 100))))
+        self.squash_slider.setValue(val_pct)
+        self.squash_label.setText(f"{val_pct}%")
 
         self.idle_input.setText(self.skin_data.get("idle_image", "idle.png"))
         tap_list = self.skin_data.get("tap_images", ["tap_left.png", "tap_right.png"])
@@ -499,18 +551,65 @@ class SettingsWindow(QWidget):
             self.save_current_skin_to_file()
 
     def insert_mapping_row(self, key_text, img_text):
+        """★ 2. 매핑 행 추가 시 현재 테마와 통일된 모던 플랫 UI 스타일 적용"""
         row = self.mapping_table.rowCount()
         self.mapping_table.insertRow(row)
+        self.mapping_table.setRowHeight(row, 36)
 
+        bg_btn = "#27272A" if self.is_dark_mode else "#F3F4F6"
+        border_btn = "#3F3F46" if self.is_dark_mode else "#E5E7EB"
+        text_btn = "#F4F4F5" if self.is_dark_mode else "#1F2937"
+        bg_input = "#27272A" if self.is_dark_mode else "#FFFFFF"
+        border_input = "#3F3F46" if self.is_dark_mode else "#D1D5DB"
+        text_input = "#F4F4F5" if self.is_dark_mode else "#111827"
+
+        btn_qss = f"""
+            QPushButton {{
+                background-color: {bg_btn};
+                border: 1px solid {border_btn};
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: {text_btn};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {"#3F3F46" if self.is_dark_mode else "#E5E7EB"};
+            }}
+            QPushButton[activeCapture="true"] {{
+                background-color: {"#78350F" if self.is_dark_mode else "#FEF3C7"};
+                border: 1px solid #F59E0B;
+                color: {"#FEF3C7" if self.is_dark_mode else "#92400E"};
+            }}
+        """
+
+        line_qss = f"""
+            QLineEdit {{
+                background-color: {bg_input};
+                border: 1px solid {border_input};
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: {text_input};
+            }}
+            QLineEdit:focus {{
+                border-color: {"#FAFAFA" if self.is_dark_mode else "#111827"};
+            }}
+        """
+
+        # 1. 키 캡처 버튼 (통일된 스타일 부여)
         btn_key = KeyCaptureButton(key_text or I18n.tr("input_waiting"))
+        btn_key.setStyleSheet(btn_qss)
         btn_key.keyCaptured.connect(lambda captured: self.on_key_captured_in_row(btn_key, captured))
         self.mapping_table.setCellWidget(row, 0, btn_key)
 
+        # 2. 이미지 파일명 입력 필드
         line_edit = QLineEdit(img_text)
+        line_edit.setStyleSheet(line_qss)
         line_edit.textChanged.connect(lambda _: self.save_current_skin_to_file())
         self.mapping_table.setCellWidget(row, 1, line_edit)
 
+        # 3. 찾아보기 버튼
         pick_btn = QPushButton(I18n.tr("col_browse"))
+        pick_btn.setStyleSheet(btn_qss)
         pick_btn.clicked.connect(lambda _, le=line_edit: self.browse_image_for(le))
         self.mapping_table.setCellWidget(row, 2, pick_btn)
 

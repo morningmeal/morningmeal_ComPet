@@ -100,6 +100,11 @@ jobs:
               /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string 'Compet needs access to detect keystrokes for pet animations.'" dist/Compet.app/Contents/Info.plist || true
               /usr/libexec/PlistBuddy -c "Add :NSSystemAdministrationUsageDescription string 'Compet needs accessibility access for global key input listener.'" dist/Compet.app/Contents/Info.plist || true
 
+              # ★ [중요] macOS Gatekeeper 오류 방지를 위한 Ad-hoc 자체 서명
+              echo "Applying Ad-hoc code signing to Compet.app..."
+              codesign --force --deep --sign - "dist/Compet.app"
+              codesign --verify --verbose "dist/Compet.app" || true
+
               cd dist
               zip -r -y ../Compet-macOS.zip Compet.app
               cd ..
@@ -146,3 +151,11 @@ jobs:
             artifacts/Compet-Windows.zip/Compet-Windows.zip
             artifacts/Compet-macOS.zip/Compet-macOS.zip
           generate_release_notes: true
+          body: |
+            ### macOS 사용 안내 (Gatekeeper 격리 속성 해제)
+            인터넷에서 다운로드한 서명되지 않은 오픈소스 앱은 macOS에서 '손상된 파일'로 표시될 수 있습니다.
+            터미널을 열고 아래 명령어를 실행하여 격리 속성을 해제해 주세요:
+            ```bash
+            xattr -cr /Applications/Compet.app
+            ```
+            *(다운로드 폴더에서 압축을 푼 경우: `xattr -cr ~/Downloads/Compet.app`)*

@@ -474,26 +474,24 @@ class SoundControlWidget(QGroupBox):
         selected_index = 0
         idx = 0
         
-        # 실제 사운드 파일들만 순수하게 목록에 추가
         for display_name, full_path in scanned.items():
-            self.sound_combo.addItem(f"🎵 {display_name}", full_path)
-            # 저장된 설정값과 일치하는 파일 선택
-            if cur_saved and (cur_saved == full_path or cur_saved == os.path.basename(full_path)):
+            self.sound_combo.addItem(f"{display_name}", full_path)
+            # 저장된 경로와 일치하는 항목 확인
+            if cur_saved and (cur_saved == full_path or os.path.basename(cur_saved) == os.path.basename(full_path)):
                 selected_index = idx
             idx += 1
 
-        # 맨 하단에 파일 직접 업로드/가져오기 항목만 배치
-        self.sound_combo.addItem("➕ " + I18n.tr("upload_sound") + "...", "__import__")
+        # 맨 하단에 파일 직접 업로드/가져오기 항목 배치
+        self.sound_combo.addItem(I18n.tr("upload_sound") + "...", "__import__")
 
-        # 목록에 파일이 하나라도 있다면 매칭된 파일(또는 첫 번째 파일)을 기본 선택
         if self.sound_combo.count() > 1:
             self.sound_combo.setCurrentIndex(selected_index)
-            # 만약 저장된 경로가 비어있었다면 첫 번째 실제 파일 경로를 설정에 자동 반영
-            if not cur_saved:
-                first_path = self.sound_combo.itemData(0)
-                if first_path and first_path != "__import__":
-                    config_mgr.settings[f"{self.prefix}_sound_path"] = first_path
-                    config_mgr.save_global_settings()
+            # 만약 저장된 사운드 경로가 비어있거나 유효하지 않다면, 첫 번째 실제 사운드를 기본값으로 즉시 바인딩
+            first_path = self.sound_combo.itemData(selected_index)
+            if first_path and first_path != "__import__":
+                config_mgr.settings[f"{self.prefix}_sound_path"] = first_path
+                config_mgr.save_global_settings()
+                sound_mgr.load_sounds()
         
         self.sound_combo.blockSignals(False)
 
@@ -515,6 +513,9 @@ class SoundControlWidget(QGroupBox):
         sound_mgr.update_volumes()
 
     def on_sound_selected(self, index):
+        if index < 0:
+            return
+
         data = self.sound_combo.itemData(index)
 
         # 사운드 파일 추가 버튼 클릭 시
@@ -522,11 +523,18 @@ class SoundControlWidget(QGroupBox):
             self.import_sound_file()
             return
 
-        # assets/sounds 폴더 내 실제 선택된 사운드 경로 저장
+        # 실제 선택된 사운드 파일 경로를 즉시 설정에 반영
         if data:
             config_mgr.settings[f"{self.prefix}_sound_path"] = data
             config_mgr.save_global_settings()
             sound_mgr.load_sounds()
+
+            # ★ 사용자가 드롭다운에서 선택하는 즉시 소리가 나도록 1회 시연 재생
+            if config_mgr.settings.get(f"{self.prefix}_sound_enabled", True):
+                if self.prefix == "key":
+                    sound_mgr.play_key()
+                else:
+                    sound_mgr.play_click()
 
     def import_sound_file(self):
         filter_str = "WAV Files (*.wav)"
@@ -553,6 +561,14 @@ class SoundControlWidget(QGroupBox):
             sound_mgr.load_sounds()
             
             self.populate_sounds()
+
+            # 업로드 직후 즉시 1회 재생
+            if config_mgr.settings.get(f"{self.prefix}_sound_enabled", True):
+                if self.prefix == "key":
+                    sound_mgr.play_key()
+                else:
+                    sound_mgr.play_click()
+
             QMessageBox.information(self, I18n.tr("complete"), f"{dest_filename} {I18n.tr('applied')}")
         except Exception as e:
             QMessageBox.critical(self, I18n.tr("error"), f"Import failed:\n{e}")
