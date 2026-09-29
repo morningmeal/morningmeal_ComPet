@@ -106,6 +106,9 @@ jobs:
             main.py
           cd dist
           zip -r ../../Compet-V3-macOS.zip Compet-V3.app
+          # Ad-hoc 임시 서명 부여
+          codesign --force --deep --sign - "Compet-V3.app"
+          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
 
       # 2. KeyPet V2 빌드 (macOS)
       - name: Build KeyPet V2 (macOS)
@@ -119,6 +122,9 @@ jobs:
             main.py
           cd dist
           zip -r ../../KeyPet-V2-macOS.zip KeyPet-V2.app
+          # Ad-hoc 임시 서명 부여
+          codesign --force --deep --sign - "Compet-V3.app"
+          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
 
       # 3. WorkTimer V1 빌드 (macOS)
       - name: Build WorkTimer V1 (macOS)
@@ -131,6 +137,9 @@ jobs:
             main.py
           cd dist
           zip -r ../../WorkTimer-V1-macOS.zip WorkTimer-V1.app
+          # Ad-hoc 임시 서명 부여
+          codesign --force --deep --sign - "Compet-V3.app"
+          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
 
   publish-release:
     needs: [build-windows, build-macos]
