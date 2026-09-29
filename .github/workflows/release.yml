@@ -39,8 +39,8 @@ jobs:
           
           $iconArg = @()
           if (Test-Path "assets/app_icon.png") {
-              python -c "from PIL import Image; img = Image.open('assets/app_icon.png'); img.save('assets/app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])"
-              $iconArg = @("--icon=assets/app_icon.ico")
+              python -c "from PIL import Image; img = Image.open('assets/app_icon.png').convert('RGBA'); img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
+              $iconArg = @("--icon=app_icon.ico")
           }
 
           pyinstaller --noconfirm --onedir --windowed --name "Compet-V3" `
@@ -61,8 +61,8 @@ jobs:
 
           $iconArg = @()
           if (Test-Path "assets/app_icon.png") {
-              python -c "from PIL import Image; img = Image.open('assets/app_icon.png'); img.save('assets/app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])"
-              $iconArg = @("--icon=assets/app_icon.ico")
+              python -c "from PIL import Image; img = Image.open('assets/app_icon.png').convert('RGBA'); img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
+              $iconArg = @("--icon=app_icon.ico")
           }
 
           pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" `
@@ -82,8 +82,8 @@ jobs:
 
           $iconArg = @()
           if (Test-Path "assets/app_icon.png") {
-              python -c "from PIL import Image; img = Image.open('assets/app_icon.png'); img.save('assets/app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])"
-              $iconArg = @("--icon=assets/app_icon.ico")
+              python -c "from PIL import Image; img = Image.open('assets/app_icon.png').convert('RGBA'); img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
+              $iconArg = @("--icon=app_icon.ico")
           }
 
           pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" `
@@ -125,7 +125,19 @@ jobs:
           
           ICON_ARG=""
           if [ -f "assets/app_icon.png" ]; then
-            ICON_ARG="--icon=assets/app_icon.png"
+            mkdir -p AppIcon.iconset
+            sips -z 16 16     assets/app_icon.png --out AppIcon.iconset/icon_16x16.png
+            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_16x16@2x.png
+            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_32x32.png
+            sips -z 64 64     assets/app_icon.png --out AppIcon.iconset/icon_32x32@2x.png
+            sips -z 128 128   assets/app_icon.png --out AppIcon.iconset/icon_128x128.png
+            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_128x128@2x.png
+            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_256x256.png
+            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_256x256@2x.png
+            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_512x512.png
+            sips -z 1024 1024 assets/app_icon.png --out AppIcon.iconset/icon_512x512@2x.png
+            iconutil -c icns AppIcon.iconset -o app_icon.icns
+            ICON_ARG="--icon=app_icon.icns"
           fi
 
           pyinstaller --noconfirm --windowed --name "Compet-V3" \
@@ -146,7 +158,19 @@ jobs:
 
           ICON_ARG=""
           if [ -f "assets/app_icon.png" ]; then
-            ICON_ARG="--icon=assets/app_icon.png"
+            mkdir -p AppIcon.iconset
+            sips -z 16 16     assets/app_icon.png --out AppIcon.iconset/icon_16x16.png
+            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_16x16@2x.png
+            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_32x32.png
+            sips -z 64 64     assets/app_icon.png --out AppIcon.iconset/icon_32x32@2x.png
+            sips -z 128 128   assets/app_icon.png --out AppIcon.iconset/icon_128x128.png
+            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_128x128@2x.png
+            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_256x256.png
+            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_256x256@2x.png
+            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_512x512.png
+            sips -z 1024 1024 assets/app_icon.png --out AppIcon.iconset/icon_512x512@2x.png
+            iconutil -c icns AppIcon.iconset -o app_icon.icns
+            ICON_ARG="--icon=app_icon.icns"
           fi
 
           pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
@@ -167,7 +191,19 @@ jobs:
 
           ICON_ARG=""
           if [ -f "assets/app_icon.png" ]; then
-            ICON_ARG="--icon=assets/app_icon.png"
+            mkdir -p AppIcon.iconset
+            sips -z 16 16     assets/app_icon.png --out AppIcon.iconset/icon_16x16.png
+            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_16x16@2x.png
+            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_32x32.png
+            sips -z 64 64     assets/app_icon.png --out AppIcon.iconset/icon_32x32@2x.png
+            sips -z 128 128   assets/app_icon.png --out AppIcon.iconset/icon_128x128.png
+            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_128x128@2x.png
+            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_256x256.png
+            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_256x256@2x.png
+            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_512x512.png
+            sips -z 1024 1024 assets/app_icon.png --out AppIcon.iconset/icon_512x512@2x.png
+            iconutil -c icns AppIcon.iconset -o app_icon.icns
+            ICON_ARG="--icon=app_icon.icns"
           fi
 
           pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \

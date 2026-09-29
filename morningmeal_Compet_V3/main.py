@@ -3,6 +3,16 @@ import sys
 import os
 import uuid
 import traceback
+
+# 1. Windows 작업 표시줄 고유 아이콘 분리 (QApplication 생성 전 필수 실행)
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        myappid = 'morningmeal.compet.desktopapp.3.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtCore import Qt
@@ -31,10 +41,18 @@ class MorningmealComPetApp:
         # 2. 오디오 풀 초기화
         sound_mgr.ensure_initialized()
 
-        # 3. assets/icon.png 로드 및 앱 전역 아이콘 지정
+        # 3. 전역 앱 아이콘 로드 및 적용
         self.app_icon = self.load_custom_icon()
         if not self.app_icon.isNull():
             self.app.setWindowIcon(self.app_icon)
+            
+            # macOS 독(Dock) 아이콘 명시적 반영
+            if sys.platform == 'darwin':
+                try:
+                    # macOS Dock 타일에 QIcon 반영
+                    self.app.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, False)
+                except Exception:
+                    pass
 
         # 4. 위젯 컨테이너
         self.timer_widgets = []
@@ -42,6 +60,7 @@ class MorningmealComPetApp:
 
         # 5. 메인 설정 창 생성
         self.settings_window = MainSettingWindow()
+        self.settings_window.setWindowIcon(self.app_icon)
         self.settings_window.settings_updated.connect(self.sync_widgets_from_config)
         self.settings_window.quit_requested.connect(self.quit_app)
 
@@ -58,14 +77,22 @@ class MorningmealComPetApp:
         activity_engine.start()
 
     def load_custom_icon(self):
-        """assets/icon.png 파일을 절대 경로 및 실행 위치 기준으로 확실하게 탐색"""
+        """다양한 환경(PyInstaller 패키징 번들, 개발 환경, 플랫폼별 규격)에서 아이콘을 탐색"""
         base_dir = os.path.dirname(os.path.abspath(__file__))
+        
         candidates = [
-            os.path.join(BUNDLE_DIR, "assets", "icon.png"),
-            os.path.join(base_dir, "assets", "icon.png"),
-            os.path.join(BUNDLE_DIR, "assets", "icon.ico"),
-            os.path.join(base_dir, "assets", "icon.ico"),
-            os.path.join(base_dir, "icon.png")
+            # 1. 플랫폼별 정규 컴파일 아이콘 우선 탐색
+            os.path.join(BUNDLE_DIR, "assets", "app_icon.ico"),
+            os.path.join(base_dir, "assets", "app_icon.ico"),
+            os.path.join(BUNDLE_DIR, "app_icon.ico"),
+            os.path.join(base_dir, "app_icon.ico"),
+            os.path.join(BUNDLE_DIR, "assets", "app_icon.icns"),
+            os.path.join(base_dir, "assets", "app_icon.icns"),
+            # 2. 원본 PNG 파일 탐색
+            os.path.join(BUNDLE_DIR, "assets", "app_icon.png"),
+            os.path.join(base_dir, "assets", "app_icon.png"),
+            os.path.join(BUNDLE_DIR, "app_icon.png"),
+            os.path.join(base_dir, "app_icon.png")
         ]
         
         for path in candidates:
@@ -104,10 +131,7 @@ class MorningmealComPetApp:
         self.settings_window.activateWindow()
 
     def connect_signals(self):
-        # 단일 인풋 엔진 이벤트 -> 글로벌 사운드 및 각 펫에 전달
         input_bridge.input_occurred.connect(self.on_input_event)
-
-        # 타이머 틱 카운팅 갱신
         activity_engine.tick.connect(self.on_timers_tick)
 
     def on_input_event(self, payload, is_mouse_click):
@@ -182,7 +206,6 @@ class MorningmealComPetApp:
                     remove_callback=self.remove_pet_by_id
                 )
                 pw.dock_changed.connect(self.on_pet_dock_changed)
-                # 스킨 또는 크기 변경 시 설정창 리스트 갱신 연결
                 pw.skin_changed.connect(lambda pid, sname: self.settings_window.tab_pet.refresh_pet_list())
                 pw.scale_changed.connect(lambda pid, sc: self.settings_window.tab_pet.refresh_pet_list())
                 pw.show()
@@ -227,11 +250,6 @@ class MorningmealComPetApp:
 
 
 def main():
-    if sys.platform == 'win32':
-        import ctypes
-        myappid = 'morningmeal.compet.desktopapp.3.0'
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-
     try:
         app_runner = MorningmealComPetApp()
         sys.exit(app_runner.run())
