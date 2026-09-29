@@ -1,0 +1,38 @@
+{
+    "language": "ko",
+    "tray_mode": false,
+    "click_through": false,
+    "lock_position": false,
+    "key_sound_enabled": false,
+    "key_volume": 44,
+    "key_preset": "preset_default",
+    "key_sound_path": "C:\\Users\\User\\Desktop\\기타\\배포\\morningmeal_Compet\\assets\\sounds\\keyboard1.wav",
+    "click_sound_enabled": false,
+    "click_volume": 50,
+    "click_preset": "preset_default",
+    "click_sound_path": "C:\\Users\\User\\Desktop\\기타\\배포\\morningmeal_Compet\\assets\\sounds\\slime1.wav",
+    "mac_permission_shown": false,
+    "instances": [
+        {
+            "id": "0fbae60a-6a41-495c-94e4-ba75a2e53b01",
+            "skin": "default",
+            "scale": 0.55,
+            "x": 1260,
+            "y": 573
+        },
+        {
+            "id": "3236fac8-7c7f-4f4e-94d6-b070317c247f",
+            "skin": "default",
+            "scale": 0.54,
+            "x": 1074,
+            "y": 578
+        },
+        {
+            "id": "20e7e8b5-d37b-4dd2-85c8-9061c79aec51",
+            "skin": "default",
+            "scale": 0.55,
+            "x": 865,
+            "y": 573
+        }
+    ]
+}

@@ -1,0 +1,10 @@
+{
+    "name": "default",
+    "squash_depth": 0.14,
+    "idle_image": "idle.png",
+    "tap_images": [
+        "tap_left.png",
+        "tap_right.png"
+    ],
+    "key_mappings": {}
+}
