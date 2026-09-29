@@ -27,40 +27,48 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 1. ComPet V3 빌드
+# 1. ComPet V3 빌드 (Windows)
       - name: Build ComPet V3 (Windows)
-        shell: bash
+        shell: pwsh
         run: |
           cd morningmeal_Compet_V3
-          pyinstaller --noconfirm --onedir --windowed --name "Compet-V3" \
-            --add-data "assets;assets" \
-            --add-data "skins;skins" \
+          New-Item -ItemType Directory -Force -Path "assets", "skins"
+          if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
+          if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
+          pyinstaller --noconfirm --onedir --windowed --name "Compet-V3" `
+            --add-data "assets;assets" `
+            --add-data "skins;skins" `
             main.py
           cd dist
-          powershell Compress-Archive -Path Compet-V3 -DestinationPath ../../Compet-V3-Windows.zip
+          Compress-Archive -Path Compet-V3 -DestinationPath ../../Compet-V3-Windows.zip
 
-      # 2. KeyPet V2 빌드
+      # 2. KeyPet V2 빌드 (Windows)
       - name: Build KeyPet V2 (Windows)
-        shell: bash
+        shell: pwsh
         run: |
           cd morningmeal_KeyPet_V2
-          pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" \
-            --add-data "assets;assets" \
-            --add-data "skins;skins" \
+          New-Item -ItemType Directory -Force -Path "assets", "skins"
+          if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
+          if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
+          pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" `
+            --add-data "assets;assets" `
+            --add-data "skins;skins" `
             main.py
           cd dist
-          powershell Compress-Archive -Path KeyPet-V2 -DestinationPath ../../KeyPet-V2-Windows.zip
+          Compress-Archive -Path KeyPet-V2 -DestinationPath ../../KeyPet-V2-Windows.zip
 
-      # 3. WorkTimer V1 빌드
+      # 3. WorkTimer V1 빌드 (Windows)
       - name: Build WorkTimer V1 (Windows)
-        shell: bash
+        shell: pwsh
         run: |
           cd morningmeal_WorkTimer_V1
-          pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" \
-            --add-data "assets;assets" \
+          New-Item -ItemType Directory -Force -Path "assets"
+          if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
+          pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" `
+            --add-data "assets;assets" `
             main.py
           cd dist
-          powershell Compress-Archive -Path WorkTimer-V1 -DestinationPath ../../WorkTimer-V1-Windows.zip
+          Compress-Archive -Path WorkTimer-V1 -DestinationPath ../../WorkTimer-V1-Windows.zip
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -86,9 +94,12 @@ jobs:
           pip install -r requirements.txt
 
       # 1. ComPet V3 빌드 (macOS)
+# 1. ComPet V3 빌드 (macOS)
       - name: Build ComPet V3 (macOS)
         run: |
           cd morningmeal_Compet_V3
+          mkdir -p assets skins
+          touch assets/.keep skins/.keep
           pyinstaller --noconfirm --windowed --name "Compet-V3" \
             --add-data "assets:assets" \
             --add-data "skins:skins" \
@@ -100,6 +111,8 @@ jobs:
       - name: Build KeyPet V2 (macOS)
         run: |
           cd morningmeal_KeyPet_V2
+          mkdir -p assets skins
+          touch assets/.keep skins/.keep
           pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
             --add-data "assets:assets" \
             --add-data "skins:skins" \
@@ -111,17 +124,13 @@ jobs:
       - name: Build WorkTimer V1 (macOS)
         run: |
           cd morningmeal_WorkTimer_V1
+          mkdir -p assets
+          touch assets/.keep
           pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \
             --add-data "assets:assets" \
             main.py
           cd dist
           zip -r ../../WorkTimer-V1-macOS.zip WorkTimer-V1.app
-
-      - name: Upload macOS Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-binaries
-          path: ./*-macOS.zip
 
   publish-release:
     needs: [build-windows, build-macos]
