@@ -1,0 +1,146 @@
+# .github/workflows/release.yml
+name: Build and Release ComPet Suite
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      # 1. ComPet V3 빌드
+      - name: Build ComPet V3 (Windows)
+        shell: bash
+        run: |
+          cd morningmeal_Compet_V3
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pyinstaller --noconfirm --onedir --windowed --name "Compet-V3" \
+            --add-data "assets;assets" \
+            --add-data "skins;skins" \
+            main.py
+          cd dist
+          powershell Compress-Archive -Path Compet-V3 -DestinationPath ../../Compet-V3-Windows.zip
+
+      # 2. KeyPet V2 빌드
+      - name: Build KeyPet V2 (Windows)
+        shell: bash
+        run: |
+          cd morningmeal_KeyPet_V2
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" \
+            --add-data "assets;assets" \
+            --add-data "skins;skins" \
+            main.py
+          cd dist
+          powershell Compress-Archive -Path KeyPet-V2 -DestinationPath ../../KeyPet-V2-Windows.zip
+
+      # 3. WorkTimer V1 빌드
+      - name: Build WorkTimer V1 (Windows)
+        shell: bash
+        run: |
+          cd morningmeal_WorkTimer_V1
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" \
+            --add-data "assets;assets" \
+            main.py
+          cd dist
+          powershell Compress-Archive -Path WorkTimer-V1 -DestinationPath ../../WorkTimer-V1-Windows.zip
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: ./*-Windows.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      # 1. ComPet V3 빌드 (macOS)
+      - name: Build ComPet V3 (macOS)
+        run: |
+          cd morningmeal_Compet_V3
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pyinstaller --noconfirm --windowed --name "Compet-V3" \
+            --add-data "assets:assets" \
+            --add-data "skins:skins" \
+            main.py
+          cd dist
+          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
+
+      # 2. KeyPet V2 빌드 (macOS)
+      - name: Build KeyPet V2 (macOS)
+        run: |
+          cd morningmeal_KeyPet_V2
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
+            --add-data "assets:assets" \
+            --add-data "skins:skins" \
+            main.py
+          cd dist
+          zip -r ../../KeyPet-V2-macOS.zip KeyPet-V2.app
+
+      # 3. WorkTimer V1 빌드 (macOS)
+      - name: Build WorkTimer V1 (macOS)
+        run: |
+          cd morningmeal_WorkTimer_V1
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \
+            --add-data "assets:assets" \
+            main.py
+          cd dist
+          zip -r ../../WorkTimer-V1-macOS.zip WorkTimer-V1.app
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binaries
+          path: ./*-macOS.zip
+
+  publish-release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            windows-binaries/*-Windows.zip
+            macos-binaries/*-macOS.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
