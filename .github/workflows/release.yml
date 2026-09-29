@@ -22,15 +22,16 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install All Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       # 1. ComPet V3 빌드
       - name: Build ComPet V3 (Windows)
         shell: bash
         run: |
           cd morningmeal_Compet_V3
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pyinstaller --noconfirm --onedir --windowed --name "Compet-V3" \
             --add-data "assets;assets" \
             --add-data "skins;skins" \
@@ -43,7 +44,6 @@ jobs:
         shell: bash
         run: |
           cd morningmeal_KeyPet_V2
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" \
             --add-data "assets;assets" \
             --add-data "skins;skins" \
@@ -56,7 +56,6 @@ jobs:
         shell: bash
         run: |
           cd morningmeal_WorkTimer_V1
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" \
             --add-data "assets;assets" \
             main.py
@@ -81,14 +80,15 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install All Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       # 1. ComPet V3 빌드 (macOS)
       - name: Build ComPet V3 (macOS)
         run: |
           cd morningmeal_Compet_V3
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pyinstaller --noconfirm --windowed --name "Compet-V3" \
             --add-data "assets:assets" \
             --add-data "skins:skins" \
@@ -100,7 +100,6 @@ jobs:
       - name: Build KeyPet V2 (macOS)
         run: |
           cd morningmeal_KeyPet_V2
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
             --add-data "assets:assets" \
             --add-data "skins:skins" \
@@ -112,7 +111,6 @@ jobs:
       - name: Build WorkTimer V1 (macOS)
         run: |
           cd morningmeal_WorkTimer_V1
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \
             --add-data "assets:assets" \
             main.py

@@ -1,0 +1,5 @@
+pyinstaller>=6.0.0
+PyQt6>=6.5.0
+pynput>=1.7.6
+pywin32>=306; sys_platform == 'win32'
+psutil>=5.9.0
