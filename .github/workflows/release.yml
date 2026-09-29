@@ -26,6 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install Pillow
 
       # 1. ComPet V3 빌드 (Windows)
       - name: Build ComPet V3 (Windows)
@@ -35,9 +36,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path "assets", "skins"
           if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
           if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
+          
+          $iconArg = @()
+          if (Test-Path "assets/app_icon.png") {
+              python -c "from PIL import Image; img = Image.open('assets/app_icon.png'); img.save('assets/app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])"
+              $iconArg = @("--icon=assets/app_icon.ico")
+          }
+
           pyinstaller --noconfirm --onedir --windowed --name "Compet-V3" `
             --add-data "assets;assets" `
             --add-data "skins;skins" `
+            @iconArg `
             main.py
           Compress-Archive -Path dist/Compet-V3 -DestinationPath "${{ github.workspace }}/Compet-V3-Windows.zip"
 
@@ -49,9 +58,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path "assets", "skins"
           if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
           if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
+
+          $iconArg = @()
+          if (Test-Path "assets/app_icon.png") {
+              python -c "from PIL import Image; img = Image.open('assets/app_icon.png'); img.save('assets/app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])"
+              $iconArg = @("--icon=assets/app_icon.ico")
+          }
+
           pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" `
             --add-data "assets;assets" `
             --add-data "skins;skins" `
+            @iconArg `
             main.py
           Compress-Archive -Path dist/KeyPet-V2 -DestinationPath "${{ github.workspace }}/KeyPet-V2-Windows.zip"
 
@@ -62,8 +79,16 @@ jobs:
           Set-Location "${{ github.workspace }}/morningmeal_WorkTimer_V1"
           New-Item -ItemType Directory -Force -Path "assets"
           if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
+
+          $iconArg = @()
+          if (Test-Path "assets/app_icon.png") {
+              python -c "from PIL import Image; img = Image.open('assets/app_icon.png'); img.save('assets/app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (32, 32), (16, 16)])"
+              $iconArg = @("--icon=assets/app_icon.ico")
+          }
+
           pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" `
             --add-data "assets;assets" `
+            @iconArg `
             main.py
           Compress-Archive -Path dist/WorkTimer-V1 -DestinationPath "${{ github.workspace }}/WorkTimer-V1-Windows.zip"
 
@@ -89,6 +114,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install Pillow
 
       # 1. ComPet V3 빌드 (macOS)
       - name: Build ComPet V3 (macOS)
@@ -96,12 +122,18 @@ jobs:
           cd "${{ github.workspace }}/morningmeal_Compet_V3"
           mkdir -p assets skins
           touch assets/.keep skins/.keep
+          
+          ICON_ARG=""
+          if [ -f "assets/app_icon.png" ]; then
+            ICON_ARG="--icon=assets/app_icon.png"
+          fi
+
           pyinstaller --noconfirm --windowed --name "Compet-V3" \
             --add-data "assets:assets" \
             --add-data "skins:skins" \
+            $ICON_ARG \
             main.py
           cd dist
-          # Ad-hoc 임시 서명 부여 후 zip 압축
           codesign --force --deep --sign - "Compet-V3.app"
           zip -r "${{ github.workspace }}/Compet-V3-macOS.zip" Compet-V3.app
 
@@ -111,12 +143,18 @@ jobs:
           cd "${{ github.workspace }}/morningmeal_KeyPet_V2"
           mkdir -p assets skins
           touch assets/.keep skins/.keep
+
+          ICON_ARG=""
+          if [ -f "assets/app_icon.png" ]; then
+            ICON_ARG="--icon=assets/app_icon.png"
+          fi
+
           pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
             --add-data "assets:assets" \
             --add-data "skins:skins" \
+            $ICON_ARG \
             main.py
           cd dist
-          # Ad-hoc 임시 서명 부여 후 zip 압축
           codesign --force --deep --sign - "KeyPet-V2.app"
           zip -r "${{ github.workspace }}/KeyPet-V2-macOS.zip" KeyPet-V2.app
 
@@ -126,11 +164,17 @@ jobs:
           cd "${{ github.workspace }}/morningmeal_WorkTimer_V1"
           mkdir -p assets
           touch assets/.keep
+
+          ICON_ARG=""
+          if [ -f "assets/app_icon.png" ]; then
+            ICON_ARG="--icon=assets/app_icon.png"
+          fi
+
           pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \
             --add-data "assets:assets" \
+            $ICON_ARG \
             main.py
           cd dist
-          # Ad-hoc 임시 서명 부여 후 zip 압축
           codesign --force --deep --sign - "WorkTimer-V1.app"
           zip -r "${{ github.workspace }}/WorkTimer-V1-macOS.zip" WorkTimer-V1.app
 
