@@ -27,11 +27,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-# 1. ComPet V3 빌드 (Windows)
+      # 1. ComPet V3 빌드 (Windows)
       - name: Build ComPet V3 (Windows)
         shell: pwsh
         run: |
-          cd morningmeal_Compet_V3
+          Set-Location "${{ github.workspace }}/morningmeal_Compet_V3"
           New-Item -ItemType Directory -Force -Path "assets", "skins"
           if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
           if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
@@ -39,14 +39,13 @@ jobs:
             --add-data "assets;assets" `
             --add-data "skins;skins" `
             main.py
-          cd dist
-          Compress-Archive -Path Compet-V3 -DestinationPath ../../Compet-V3-Windows.zip
+          Compress-Archive -Path dist/Compet-V3 -DestinationPath "${{ github.workspace }}/Compet-V3-Windows.zip"
 
       # 2. KeyPet V2 빌드 (Windows)
       - name: Build KeyPet V2 (Windows)
         shell: pwsh
         run: |
-          cd morningmeal_KeyPet_V2
+          Set-Location "${{ github.workspace }}/morningmeal_KeyPet_V2"
           New-Item -ItemType Directory -Force -Path "assets", "skins"
           if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
           if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
@@ -54,21 +53,19 @@ jobs:
             --add-data "assets;assets" `
             --add-data "skins;skins" `
             main.py
-          cd dist
-          Compress-Archive -Path KeyPet-V2 -DestinationPath ../../KeyPet-V2-Windows.zip
+          Compress-Archive -Path dist/KeyPet-V2 -DestinationPath "${{ github.workspace }}/KeyPet-V2-Windows.zip"
 
       # 3. WorkTimer V1 빌드 (Windows)
       - name: Build WorkTimer V1 (Windows)
         shell: pwsh
         run: |
-          cd morningmeal_WorkTimer_V1
+          Set-Location "${{ github.workspace }}/morningmeal_WorkTimer_V1"
           New-Item -ItemType Directory -Force -Path "assets"
           if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
           pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" `
             --add-data "assets;assets" `
             main.py
-          cd dist
-          Compress-Archive -Path WorkTimer-V1 -DestinationPath ../../WorkTimer-V1-Windows.zip
+          Compress-Archive -Path dist/WorkTimer-V1 -DestinationPath "${{ github.workspace }}/WorkTimer-V1-Windows.zip"
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -94,10 +91,9 @@ jobs:
           pip install -r requirements.txt
 
       # 1. ComPet V3 빌드 (macOS)
-# 1. ComPet V3 빌드 (macOS)
       - name: Build ComPet V3 (macOS)
         run: |
-          cd morningmeal_Compet_V3
+          cd "${{ github.workspace }}/morningmeal_Compet_V3"
           mkdir -p assets skins
           touch assets/.keep skins/.keep
           pyinstaller --noconfirm --windowed --name "Compet-V3" \
@@ -105,15 +101,14 @@ jobs:
             --add-data "skins:skins" \
             main.py
           cd dist
-          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
-          # Ad-hoc 임시 서명 부여
+          # Ad-hoc 임시 서명 부여 후 zip 압축
           codesign --force --deep --sign - "Compet-V3.app"
-          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
+          zip -r "${{ github.workspace }}/Compet-V3-macOS.zip" Compet-V3.app
 
       # 2. KeyPet V2 빌드 (macOS)
       - name: Build KeyPet V2 (macOS)
         run: |
-          cd morningmeal_KeyPet_V2
+          cd "${{ github.workspace }}/morningmeal_KeyPet_V2"
           mkdir -p assets skins
           touch assets/.keep skins/.keep
           pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
@@ -121,25 +116,29 @@ jobs:
             --add-data "skins:skins" \
             main.py
           cd dist
-          zip -r ../../KeyPet-V2-macOS.zip KeyPet-V2.app
-          # Ad-hoc 임시 서명 부여
-          codesign --force --deep --sign - "Compet-V3.app"
-          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
+          # Ad-hoc 임시 서명 부여 후 zip 압축
+          codesign --force --deep --sign - "KeyPet-V2.app"
+          zip -r "${{ github.workspace }}/KeyPet-V2-macOS.zip" KeyPet-V2.app
 
       # 3. WorkTimer V1 빌드 (macOS)
       - name: Build WorkTimer V1 (macOS)
         run: |
-          cd morningmeal_WorkTimer_V1
+          cd "${{ github.workspace }}/morningmeal_WorkTimer_V1"
           mkdir -p assets
           touch assets/.keep
           pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \
             --add-data "assets:assets" \
             main.py
           cd dist
-          zip -r ../../WorkTimer-V1-macOS.zip WorkTimer-V1.app
-          # Ad-hoc 임시 서명 부여
-          codesign --force --deep --sign - "Compet-V3.app"
-          zip -r ../../Compet-V3-macOS.zip Compet-V3.app
+          # Ad-hoc 임시 서명 부여 후 zip 압축
+          codesign --force --deep --sign - "WorkTimer-V1.app"
+          zip -r "${{ github.workspace }}/WorkTimer-V1-macOS.zip" WorkTimer-V1.app
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binaries
+          path: ./*-macOS.zip
 
   publish-release:
     needs: [build-windows, build-macos]
