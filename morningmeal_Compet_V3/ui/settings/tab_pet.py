@@ -180,16 +180,16 @@ class TabPetSettings(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 8, 4, 4)
 
+        # 3개 서브 탭 (일반, 활성 펫 관리, 스킨 에디터)
         self.sub_tabs = QTabWidget()
         self.sub_tabs.setObjectName("subTabWidget")
 
-        # ---------------- 1. 펫 인스턴스 서브 탭 ----------------
-        self.sub_page_pets = QWidget()
-        layout_pets = QVBoxLayout(self.sub_page_pets)
-        layout_pets.setContentsMargins(10, 10, 10, 10)
-        layout_pets.setSpacing(10)
+        # ---------------- 1. 펫 일반 설정 서브 탭 ----------------
+        self.sub_page_general = QWidget()
+        layout_general = QVBoxLayout(self.sub_page_general)
+        layout_general.setContentsMargins(14, 14, 14, 14)
+        layout_general.setSpacing(12)
 
-        top = QHBoxLayout()
         self.clamp_cb = QCheckBox(I18n.tr("clamp_to_screen"))
         self.clamp_cb.setChecked(config_mgr.config.get("settings", {}).get("clamp_to_screen", True))
         self.clamp_cb.toggled.connect(lambda c: self.save_opt("clamp_to_screen", c))
@@ -198,20 +198,23 @@ class TabPetSettings(QWidget):
         self.click_thru_cb.setChecked(config_mgr.config.get("settings", {}).get("click_through", False))
         self.click_thru_cb.toggled.connect(lambda c: self.save_opt("click_through", c))
 
-        # 바운스(압축) 애니메이션 사용 여부 토글 체크박스 추가
-        self.bounce_cb = QCheckBox(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
-        self.bounce_cb.setChecked(config_mgr.config.get("settings", {}).get("enable_bounce_animation", True))
-        self.bounce_cb.toggled.connect(lambda c: self.save_opt("enable_bounce_animation", c))
+        layout_general.addWidget(self.clamp_cb)
+        layout_general.addWidget(self.click_thru_cb)
+        layout_general.addStretch()
 
+        # ---------------- 2. 펫 인스턴스 관리 서브 탭 ----------------
+        self.sub_page_pets = QWidget()
+        layout_pets = QVBoxLayout(self.sub_page_pets)
+        layout_pets.setContentsMargins(10, 10, 10, 10)
+        layout_pets.setSpacing(10)
+
+        top_pets = QHBoxLayout()
+        top_pets.addStretch()
         self.btn_add_pet = QPushButton(I18n.tr("add_pet"))
+        self.btn_add_pet.setFixedHeight(30)
         self.btn_add_pet.clicked.connect(self.add_pet)
-
-        top.addWidget(self.clamp_cb)
-        top.addWidget(self.click_thru_cb)
-        top.addWidget(self.bounce_cb)
-        top.addStretch()
-        top.addWidget(self.btn_add_pet)
-        layout_pets.addLayout(top)
+        top_pets.addWidget(self.btn_add_pet)
+        layout_pets.addLayout(top_pets)
 
         scroll_pets = QScrollArea()
         scroll_pets.setWidgetResizable(True)
@@ -223,7 +226,7 @@ class TabPetSettings(QWidget):
         scroll_pets.setWidget(p_content)
         layout_pets.addWidget(scroll_pets)
 
-        # ---------------- 2. 스킨 에디터 서브 탭 ----------------
+        # ---------------- 3. 스킨 에디터 서브 탭 ----------------
         self.sub_page_skin = QWidget()
         layout_skin = QVBoxLayout(self.sub_page_skin)
         layout_skin.setContentsMargins(10, 10, 10, 10)
@@ -242,6 +245,11 @@ class TabPetSettings(QWidget):
         bar_s.addWidget(self.btn_open_folder, 1)
         layout_skin.addLayout(bar_s)
 
+        # 스킨별 바운스(압축) 애니메이션 활성화 체크박스
+        self.skin_bounce_cb = QCheckBox(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
+        self.skin_bounce_cb.toggled.connect(self.on_skin_bounce_toggled)
+        layout_skin.addWidget(self.skin_bounce_cb)
+
         squash_layout = QHBoxLayout()
         self.lbl_squash_title = QLabel(I18n.tr("squash_depth"))
         self.squash_slider = QSlider(Qt.Orientation.Horizontal)
@@ -254,12 +262,10 @@ class TabPetSettings(QWidget):
         squash_layout.addWidget(self.squash_lbl)
         layout_skin.addLayout(squash_layout)
 
-        # 키 매핑 섹션 타이틀 라벨
         self.lbl_key_map = QLabel(I18n.tr("key_mapping_section"))
         self.lbl_key_map.setStyleSheet("font-weight: 600; font-size: 12px; margin-top: 4px; color: #4B5563;")
         layout_skin.addWidget(self.lbl_key_map)
 
-        # 모던 스타일 키 매핑 테이블
         self.map_table = QTableWidget(0, 3)
         self.map_table.setHorizontalHeaderLabels([
             I18n.tr("col_input"), I18n.tr("col_image"), I18n.tr("col_browse")
@@ -315,7 +321,8 @@ class TabPetSettings(QWidget):
         btn_map_box.addWidget(self.btn_exp)
         layout_skin.addLayout(btn_map_box)
 
-        # 서브 탭 등록
+        # 3개 서브 탭 등록
+        self.sub_tabs.addTab(self.sub_page_general, I18n.tr("tab_general"))
         self.sub_tabs.addTab(self.sub_page_pets, I18n.tr("subtab_pet_list"))
         self.sub_tabs.addTab(self.sub_page_skin, I18n.tr("subtab_skin_editor"))
 
@@ -373,9 +380,21 @@ class TabPetSettings(QWidget):
         s_val = int(conf.get("squash_depth", 0.20) * 100)
         self.squash_slider.setValue(s_val)
         self.squash_lbl.setText(f"{s_val}%")
+        
+        # 현재 스킨의 바운스 활성화 여부 동기화
+        self.skin_bounce_cb.blockSignals(True)
+        self.skin_bounce_cb.setChecked(conf.get("enable_bounce", True))
+        self.skin_bounce_cb.blockSignals(False)
+
         self.map_table.setRowCount(0)
         for k, v in conf.get("key_mappings", {}).items():
             self.insert_map_row(k, v)
+
+    def on_skin_bounce_toggled(self, checked):
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+        conf["enable_bounce"] = checked
+        config_mgr.save_skin_config(self.current_editing_skin, conf)
+        self.settings_changed.emit()
 
     def on_squash_slider(self, val):
         self.squash_lbl.setText(f"{val}%")
@@ -490,6 +509,7 @@ class TabPetSettings(QWidget):
                 os.makedirs(folder, exist_ok=True)
                 config_mgr.save_skin_config(name.strip(), {
                     "name": name.strip(), "squash_depth": 0.20,
+                    "enable_bounce": True,
                     "idle_image": "idle.png", "tap_images": ["tap_left.png", "tap_right.png"],
                     "key_mappings": {}
                 })
@@ -524,16 +544,22 @@ class TabPetSettings(QWidget):
             QMessageBox.critical(self, I18n.tr("error"), str(e))
 
     def retranslate_ui(self):
-        self.sub_tabs.setTabText(0, I18n.tr("subtab_pet_list"))
-        self.sub_tabs.setTabText(1, I18n.tr("subtab_skin_editor"))
+        # 3개 서브 탭 번역
+        self.sub_tabs.setTabText(0, I18n.tr("tab_general"))
+        self.sub_tabs.setTabText(1, I18n.tr("subtab_pet_list"))
+        self.sub_tabs.setTabText(2, I18n.tr("subtab_skin_editor"))
         
+        # 일반 탭
         self.clamp_cb.setText(I18n.tr("clamp_to_screen"))
         self.click_thru_cb.setText(I18n.tr("click_through"))
-        self.bounce_cb.setText(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
+
+        # 펫 목록 탭
         self.btn_add_pet.setText(I18n.tr("add_pet"))
         
+        # 스킨 에디터 탭
         self.btn_new_skin.setText(I18n.tr("create_skin"))
         self.btn_open_folder.setText(I18n.tr("open_skin_folder"))
+        self.skin_bounce_cb.setText(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
         self.lbl_squash_title.setText(I18n.tr("squash_depth"))
 
         self.lbl_key_map.setText(I18n.tr("key_mapping_section"))

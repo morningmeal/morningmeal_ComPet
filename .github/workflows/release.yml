@@ -28,7 +28,7 @@ jobs:
           pip install -r requirements.txt
           pip install Pillow
 
-      # 1. ComPet V3 빌드 (Windows)
+      # ComPet V3 단독 빌드 (Windows)
       - name: Build ComPet V3 (Windows)
         shell: pwsh
         run: |
@@ -49,48 +49,6 @@ jobs:
             @iconArg `
             main.py
           Compress-Archive -Path dist/Compet-V3 -DestinationPath "${{ github.workspace }}/Compet-V3-Windows.zip"
-
-      # 2. KeyPet V2 빌드 (Windows)
-      - name: Build KeyPet V2 (Windows)
-        shell: pwsh
-        run: |
-          Set-Location "${{ github.workspace }}/morningmeal_KeyPet_V2"
-          New-Item -ItemType Directory -Force -Path "assets", "skins"
-          if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
-          if (-not (Get-ChildItem -Path "skins")) { New-Item -ItemType File -Force -Path "skins/.keep" }
-
-          $iconArg = @()
-          if (Test-Path "assets/app_icon.png") {
-              python -c "from PIL import Image; img = Image.open('assets/app_icon.png').convert('RGBA'); img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
-              $iconArg = @("--icon=app_icon.ico")
-          }
-
-          pyinstaller --noconfirm --onedir --windowed --name "KeyPet-V2" `
-            --add-data "assets;assets" `
-            --add-data "skins;skins" `
-            @iconArg `
-            main.py
-          Compress-Archive -Path dist/KeyPet-V2 -DestinationPath "${{ github.workspace }}/KeyPet-V2-Windows.zip"
-
-      # 3. WorkTimer V1 빌드 (Windows)
-      - name: Build WorkTimer V1 (Windows)
-        shell: pwsh
-        run: |
-          Set-Location "${{ github.workspace }}/morningmeal_WorkTimer_V1"
-          New-Item -ItemType Directory -Force -Path "assets"
-          if (-not (Get-ChildItem -Path "assets")) { New-Item -ItemType File -Force -Path "assets/.keep" }
-
-          $iconArg = @()
-          if (Test-Path "assets/app_icon.png") {
-              python -c "from PIL import Image; img = Image.open('assets/app_icon.png').convert('RGBA'); img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
-              $iconArg = @("--icon=app_icon.ico")
-          }
-
-          pyinstaller --noconfirm --onedir --windowed --name "WorkTimer-V1" `
-            --add-data "assets;assets" `
-            @iconArg `
-            main.py
-          Compress-Archive -Path dist/WorkTimer-V1 -DestinationPath "${{ github.workspace }}/WorkTimer-V1-Windows.zip"
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -116,7 +74,7 @@ jobs:
           pip install -r requirements.txt
           pip install Pillow
 
-      # 1. ComPet V3 빌드 (macOS)
+      # ComPet V3 단독 빌드 (macOS)
       - name: Build ComPet V3 (macOS)
         run: |
           cd "${{ github.workspace }}/morningmeal_Compet_V3"
@@ -149,82 +107,13 @@ jobs:
           codesign --force --deep --sign - "Compet-V3.app"
           zip -r "${{ github.workspace }}/Compet-V3-macOS.zip" Compet-V3.app
 
-      # 2. KeyPet V2 빌드 (macOS)
-      - name: Build KeyPet V2 (macOS)
-        run: |
-          cd "${{ github.workspace }}/morningmeal_KeyPet_V2"
-          mkdir -p assets skins
-          touch assets/.keep skins/.keep
-
-          ICON_ARG=""
-          if [ -f "assets/app_icon.png" ]; then
-            mkdir -p AppIcon.iconset
-            sips -z 16 16     assets/app_icon.png --out AppIcon.iconset/icon_16x16.png
-            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_16x16@2x.png
-            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_32x32.png
-            sips -z 64 64     assets/app_icon.png --out AppIcon.iconset/icon_32x32@2x.png
-            sips -z 128 128   assets/app_icon.png --out AppIcon.iconset/icon_128x128.png
-            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_128x128@2x.png
-            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_256x256.png
-            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_256x256@2x.png
-            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_512x512.png
-            sips -z 1024 1024 assets/app_icon.png --out AppIcon.iconset/icon_512x512@2x.png
-            iconutil -c icns AppIcon.iconset -o app_icon.icns
-            ICON_ARG="--icon=app_icon.icns"
-          fi
-
-          pyinstaller --noconfirm --windowed --name "KeyPet-V2" \
-            --add-data "assets:assets" \
-            --add-data "skins:skins" \
-            $ICON_ARG \
-            main.py
-          cd dist
-          codesign --force --deep --sign - "KeyPet-V2.app"
-          zip -r "${{ github.workspace }}/KeyPet-V2-macOS.zip" KeyPet-V2.app
-
-      # 3. WorkTimer V1 빌드 (macOS)
-      - name: Build WorkTimer V1 (macOS)
-        run: |
-          cd "${{ github.workspace }}/morningmeal_WorkTimer_V1"
-          mkdir -p assets
-          touch assets/.keep
-
-          ICON_ARG=""
-          if [ -f "assets/app_icon.png" ]; then
-            mkdir -p AppIcon.iconset
-            sips -z 16 16     assets/app_icon.png --out AppIcon.iconset/icon_16x16.png
-            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_16x16@2x.png
-            sips -z 32 32     assets/app_icon.png --out AppIcon.iconset/icon_32x32.png
-            sips -z 64 64     assets/app_icon.png --out AppIcon.iconset/icon_32x32@2x.png
-            sips -z 128 128   assets/app_icon.png --out AppIcon.iconset/icon_128x128.png
-            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_128x128@2x.png
-            sips -z 256 256   assets/app_icon.png --out AppIcon.iconset/icon_256x256.png
-            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_256x256@2x.png
-            sips -z 512 512   assets/app_icon.png --out AppIcon.iconset/icon_512x512.png
-            sips -z 1024 1024 assets/app_icon.png --out AppIcon.iconset/icon_512x512@2x.png
-            iconutil -c icns AppIcon.iconset -o app_icon.icns
-            ICON_ARG="--icon=app_icon.icns"
-          fi
-
-          pyinstaller --noconfirm --windowed --name "WorkTimer-V1" \
-            --add-data "assets:assets" \
-            $ICON_ARG \
-            main.py
-          cd dist
-          codesign --force --deep --sign - "WorkTimer-V1.app"
-          zip -r "${{ github.workspace }}/WorkTimer-V1-macOS.zip" WorkTimer-V1.app
-
-      # 4. macOS 빌드 산출물 실행/서명 자동 검증 (Smoke Test)
-      - name: Verify macOS App Bundles
+      # ComPet V3 단독 스모크 테스트 (크래시 로그 자동 출력 포함)
+      - name: Verify macOS App Bundle
         run: |
           echo "=== 1. Codesign 검증 ==="
           codesign --verify --verbose "${{ github.workspace }}/morningmeal_Compet_V3/dist/Compet-V3.app"
-          codesign --verify --verbose "${{ github.workspace }}/morningmeal_KeyPet_V2/dist/KeyPet-V2.app"
-          codesign --verify --verbose "${{ github.workspace }}/morningmeal_WorkTimer_V1/dist/WorkTimer-V1.app"
 
           echo "=== 2. 실행 및 초기화 크래시 검증 (3초 스모크 테스트) ==="
-          # CI 환경에서 GUI 이벤트 루프를 헤드리스(offscreen)로 3초간 구동
-          # 만약 의존성 누락이나 문법/모듈 에러가 있으면 3초 내 비정상 종료되어 즉시 감지됨
           export QT_QPA_PLATFORM=offscreen
 
           echo "Testing Compet-V3 executable..."
@@ -236,32 +125,12 @@ jobs:
             kill -TERM $APP_PID 2>/dev/null || true
           else
             echo "Error: Compet-V3 crashed on startup!"
-            wait $APP_PID
-            exit 1
-          fi
-
-          echo "Testing KeyPet-V2 executable..."
-          "${{ github.workspace }}/morningmeal_KeyPet_V2/dist/KeyPet-V2.app/Contents/MacOS/KeyPet-V2" &
-          APP_PID=$!
-          sleep 3
-          if kill -0 $APP_PID 2>/dev/null; then
-            echo "KeyPet-V2 passed smoke test."
-            kill -TERM $APP_PID 2>/dev/null || true
-          else
-            echo "Error: KeyPet-V2 crashed on startup!"
-            wait $APP_PID
-            exit 1
-          fi
-
-          echo "Testing WorkTimer-V1 executable..."
-          "${{ github.workspace }}/morningmeal_WorkTimer_V1/dist/WorkTimer-V1.app/Contents/MacOS/WorkTimer-V1" &
-          APP_PID=$!
-          sleep 3
-          if kill -0 $APP_PID 2>/dev/null; then
-            echo "WorkTimer-V1 passed smoke test."
-            kill -TERM $APP_PID 2>/dev/null || true
-          else
-            echo "Error: WorkTimer-V1 crashed on startup!"
+            CRASH_LOG="$HOME/Library/Application Support/morningmeal_ComPet/crash_log.txt"
+            if [ -f "$CRASH_LOG" ]; then
+              echo "=== CRASH LOG CONTENTS ==="
+              cat "$CRASH_LOG"
+              echo "=========================="
+            fi
             wait $APP_PID
             exit 1
           fi
@@ -287,7 +156,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            windows-binaries/*-Windows.zip
-            macos-binaries/*-macOS.zip
+            windows-binaries/Compet-V3-Windows.zip
+            macos-binaries/Compet-V3-macOS.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

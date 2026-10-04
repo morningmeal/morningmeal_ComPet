@@ -46,8 +46,7 @@ DEFAULT_CONFIG = {
         "click_through": False,
         "clamp_to_screen": True,
         "magnetic_snap": True,
-        "snap_distance": 15,
-        "enable_bounce_animation": True  # 압축(바운스) 애니메이션 활성화 옵션
+        "snap_distance": 15
     },
     "sound": {
         "key_sound_enabled": True,
@@ -96,6 +95,7 @@ class ConfigManager:
                 self.save_skin_config("default", {
                     "name": "default",
                     "squash_depth": 0.20,
+                    "enable_bounce": True,
                     "idle_image": "idle.png",
                     "tap_images": ["tap_left.png", "tap_right.png"],
                     "key_mappings": {}
@@ -140,6 +140,7 @@ class ConfigManager:
         conf = {
             "name": skin_name,
             "squash_depth": 0.20,
+            "enable_bounce": True,
             "idle_image": "idle.png",
             "tap_images": ["tap_left.png", "tap_right.png"],
             "key_mappings": {}

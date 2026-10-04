@@ -26,6 +26,7 @@ class PetWidget(QWidget):
         self.tap_index = 0
         self.scale_x, self.scale_y = 1.0, 1.0
         self.squash_depth = 0.20
+        self.skin_enable_bounce = True
         self.stiffness = 0.25
         self.hit_times = deque(maxlen=20)
         self.drag_position = QPoint()
@@ -70,6 +71,8 @@ class PetWidget(QWidget):
         skin_conf = config_mgr.get_skin_config(skin)
 
         self.squash_depth = float(skin_conf.get("squash_depth", 0.20))
+        # 스킨별 바운스(압축) 애니메이션 활성화 여부 로드
+        self.skin_enable_bounce = bool(skin_conf.get("enable_bounce", True))
         self.key_mappings = skin_conf.get("key_mappings", {})
 
         s_dir = os.path.join(SKINS_DIR, skin)
@@ -114,7 +117,7 @@ class PetWidget(QWidget):
                 matched_pixmap = self.cached_pixmaps[cand]
                 break
 
-        # 타건 이미지 변경 (모양 변화는 유지)
+        # 타건 이미지 변경 (프레임 변환은 유지)
         if matched_pixmap:
             self.current_pixmap = matched_pixmap
         elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
@@ -124,16 +127,14 @@ class PetWidget(QWidget):
                 self.current_pixmap = self.tap_pixmaps[self.tap_index]
                 self.tap_index = (self.tap_index + 1) % len(self.tap_pixmaps)
 
-        # ★ 압축/바운스 애니메이션 활성화 여부 확인
-        anim_enabled = config_mgr.config.get("settings", {}).get("enable_bounce_animation", True)
-        if anim_enabled:
+        # 현재 스킨에 설정된 바운스 애니메이션 사용 여부에 따라 처리
+        if self.skin_enable_bounce:
             extra_squash = min(apm / 600.0, 1.0) * 0.08
             actual_depth = min(self.squash_depth + extra_squash, 0.75)
             self.scale_y = max(0.20, 1.0 - actual_depth)
             self.scale_x = 1.0 + (actual_depth * 0.5)
             self.anim_timer.start(16)
         else:
-            # 애니메이션이 꺼져 있으면 크기 변형 없이 원본 비율 유지
             self.scale_x, self.scale_y = 1.0, 1.0
             if self.anim_timer.isActive():
                 self.anim_timer.stop()
@@ -164,7 +165,6 @@ class PetWidget(QWidget):
         painter.translate(-self.current_pixmap.width() / 2, -self.current_pixmap.height())
         painter.drawPixmap(0, 0, self.current_pixmap)
 
-    # 1. 미결합 상태의 Ctrl + 휠 크기 조절 (10% ~ 150%, 5% 단위)
     def wheelEvent(self, event: QWheelEvent):
         if self.pet_data.get("bound_timer_id"):
             super().wheelEvent(event)
@@ -228,7 +228,6 @@ class PetWidget(QWidget):
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
-    # 2. 펫 이동 시 결합된 타이머도 함께 동반 이동
     def mouseMoveEvent(self, event: QMouseEvent):
         if event.buttons() == Qt.MouseButton.LeftButton:
             new_pos = event.globalPosition().toPoint() - self.drag_position

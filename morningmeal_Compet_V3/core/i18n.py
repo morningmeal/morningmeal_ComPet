@@ -66,13 +66,11 @@ TRANSLATIONS = {
         "export_skin": "내보내기 (.zip)",
         "clamp_to_screen": "펫 화면 밖 탈출 방지",
         "click_through": "마우스 클릭 관통 (무시)",
+        "enable_bounce_animation": "바운스 애니메이션",
         "bound_timer_label": "결합 타이머:",
         "unbound": "미결합 (자유 모드)",
         "remove_pet": "펫 삭제",
         "key_mapping_section": "키 매핑",
-        "col_input": "감지 키",
-        "col_image": "출력 이미지",
-        "col_browse": "파일 탐색",
 
         # 사운드 설정
         "key_sound": "키보드 타건음 설정",
@@ -170,13 +168,11 @@ TRANSLATIONS = {
         "export_skin": "Export Current (.zip)",
         "clamp_to_screen": "Clamp to screen boundary",
         "click_through": "Click-Through (Ignore Mouse)",
+        "enable_bounce_animation": "Bounce Animation",
         "bound_timer_label": "Bound Timer:",
         "unbound": "Unbound (Free Mode)",
         "remove_pet": "Remove Pet",
         "key_mapping_section": "Key Mappings",
-        "col_input": "Trigger Key",
-        "col_image": "Target Image",
-        "col_browse": "Browse",
 
         "key_sound": "Keyboard Sound",
         "click_sound": "Mouse Click Sound",
@@ -272,13 +268,11 @@ TRANSLATIONS = {
         "export_skin": "エクスポート (.zip)",
         "clamp_to_screen": "画面外への移動を制限する",
         "click_through": "クリック透過 (マウス無視)",
+        "enable_bounce_animation": "バウンスアニメーション",
         "bound_timer_label": "結合タイマー:",
         "unbound": "未結合 (自由モード)",
         "remove_pet": "ペットを削除",
         "key_mapping_section": "キーマッピング",
-        "col_input": "検知キー",
-        "col_image": "出力画像",
-        "col_browse": "ファイル参照",
 
         "key_sound": "キーボード打鍵音設定",
         "click_sound": "マウスクリック音設定",
@@ -374,13 +368,11 @@ TRANSLATIONS = {
         "export_skin": "导出当前皮肤 (.zip)",
         "clamp_to_screen": "限制宠物不超出屏幕范围",
         "click_through": "鼠标穿透 (忽略点击)",
+        "enable_bounce_animation": "回弹动画",
         "bound_timer_label": "绑定计时器:",
         "unbound": "未绑定 (自由模式)",
         "remove_pet": "删除宠物",
         "key_mapping_section": "按键映射",
-        "col_input": "触发按键",
-        "col_image": "对应图片",
-        "col_browse": "浏览文件",
 
         "key_sound": "键盘按键音设置",
         "click_sound": "鼠标点击音设置",
@@ -476,13 +468,11 @@ TRANSLATIONS = {
         "export_skin": "導出當前皮膚 (.zip)",
         "clamp_to_screen": "限制寵物不超出螢幕範圍",
         "click_through": "滑鼠穿透 (忽略點擊)",
+        "enable_bounce_animation": "回彈動畫",
         "bound_timer_label": "綁定計時器:",
         "unbound": "未綁定 (自由模式)",
         "remove_pet": "刪除寵物",
         "key_mapping_section": "按鍵映射",
-        "col_input": "觸發按鍵",
-        "col_image": "對應圖片",
-        "col_browse": "瀏覽檔案",
 
         "key_sound": "鍵盤按鍵音設定",
         "click_sound": "滑鼠點擊音設定",
@@ -545,7 +535,9 @@ class I18nManager(QObject):
     def get_lang(self):
         return self._current_lang
 
-    def tr(self, key):
-        return TRANSLATIONS.get(self._current_lang, TRANSLATIONS["ko"]).get(key, key)
+    def tr(self, key, default=None):
+        """다국어 문자열 반환. 번역 키가 없을 경우 default 또는 key 반환"""
+        fallback = default if default is not None else key
+        return TRANSLATIONS.get(self._current_lang, TRANSLATIONS["ko"]).get(key, fallback)
 
 I18n = I18nManager()

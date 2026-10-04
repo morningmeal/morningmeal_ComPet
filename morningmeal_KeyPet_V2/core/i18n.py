@@ -6,6 +6,7 @@ TRANSLATIONS = {
         "settings_title": "morningmeal_Compet - 환경 설정", "tab_general": "일반", "tab_sound": "사운드", "tab_pets": "펫 관리", "tab_skin": "스킨 편집",
         "language": "언어 (Language)", "tray_mode": "작업표시줄에 표시하지 않고 트레이로 숨기기",
         "clamp_to_screen": "펫이 화면 밖으로 나가지 않도록 제한",
+        "enable_bounce_animation": "바운스 애니메이션",
         "sound_enable": "사운드 활성화", "volume": "볼륨", "upload_sound": "사운드 파일 업로드",
         "sound_default": "기본 사운드",
         "key_sound": "키보드 타건음 설정", "click_sound": "마우스 클릭음 설정",
@@ -44,6 +45,7 @@ TRANSLATIONS = {
         "settings_title": "morningmeal_Compet - Settings", "tab_general": "General", "tab_sound": "Sound", "tab_pets": "Pets", "tab_skin": "Skin Editor",
         "language": "Language", "tray_mode": "Hide from Taskbar (Tray mode)",
         "clamp_to_screen": "Prevent pet from leaving the screen",
+        "enable_bounce_animation": "Bounce Animation",
         "sound_enable": "Enable Sound", "volume": "Volume", "upload_sound": "Upload File",
         "sound_default": "Default Sound",
         "key_sound": "Keyboard Sound", "click_sound": "Mouse Click Sound",
@@ -82,6 +84,7 @@ TRANSLATIONS = {
         "settings_title": "morningmeal_Compet - 設定", "tab_general": "一般", "tab_sound": "サウンド", "tab_pets": "ペット管理", "tab_skin": "スキン編集",
         "language": "言語 (Language)", "tray_mode": "タスクバーから隠す（トレイモード）",
         "clamp_to_screen": "画面外への移動を制限する",
+        "enable_bounce_animation": "バウンスアニメーション",
         "sound_enable": "サウンド有効化", "volume": "音量", "upload_sound": "アップロード",
         "sound_default": "デフォルト音",
         "key_sound": "キーボード音", "click_sound": "マウスクリック音",
@@ -120,6 +123,7 @@ TRANSLATIONS = {
         "settings_title": "morningmeal_Compet - 设置", "tab_general": "常规", "tab_sound": "声音", "tab_pets": "宠物管理", "tab_skin": "皮肤编辑",
         "language": "语言 (Language)", "tray_mode": "隐藏任务栏图标 (托盘模式)",
         "clamp_to_screen": "限制宠物不超出屏幕范围",
+        "enable_bounce_animation": "回弹动画",
         "sound_enable": "启用声音", "volume": "音量", "upload_sound": "上传声音",
         "sound_default": "默认声音",
         "key_sound": "键盘声音", "click_sound": "鼠标点击声音",
@@ -158,6 +162,7 @@ TRANSLATIONS = {
         "settings_title": "morningmeal_Compet - 設定", "tab_general": "常規", "tab_sound": "聲音", "tab_pets": "寵物管理", "tab_skin": "皮膚編輯",
         "language": "語言 (Language)", "tray_mode": "隱藏任務欄圖標 (托盤模式)",
         "clamp_to_screen": "限制寵物不超出螢幕範圍",
+        "enable_bounce_animation": "回彈動畫",
         "sound_enable": "啟用聲音", "volume": "音量", "upload_sound": "上傳聲音",
         "sound_default": "默認聲音",
         "key_sound": "鍵盤聲音", "click_sound": "滑鼠點擊聲音",
@@ -217,7 +222,9 @@ class I18nManager(QObject):
     def get_lang(self):
         return self._current_lang
 
-    def tr(self, key):
-        return TRANSLATIONS.get(self._current_lang, TRANSLATIONS["ko"]).get(key, key)
+    def tr(self, key, default=None):
+        """다국어 문자열 반환. 번역 키가 없을 경우 default 또는 key 반환"""
+        fallback = default if default is not None else key
+        return TRANSLATIONS.get(self._current_lang, TRANSLATIONS["ko"]).get(key, fallback)
 
 I18n = I18nManager()

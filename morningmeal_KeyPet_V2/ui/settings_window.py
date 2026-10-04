@@ -150,8 +150,8 @@ class SettingsWindow(QWidget):
         self.clamp_cb.setChecked(config_mgr.settings.get("clamp_to_screen", True))
         self.clamp_cb.toggled.connect(self.toggle_clamp_screen)
 
-        # ★ 압축/바운스 애니메이션 활성화 토글 체크박스 추가
-        self.bounce_cb = QCheckBox()
+        # 압축/바운스 애니메이션 활성화 토글 체크박스
+        self.bounce_cb = QCheckBox(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
         self.bounce_cb.setChecked(config_mgr.settings.get("enable_bounce_animation", True))
         self.bounce_cb.toggled.connect(self.toggle_bounce_animation)
 
