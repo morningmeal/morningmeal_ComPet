@@ -17,10 +17,9 @@ from ui.components import PetCardWidget, SoundControlWidget, KeyCaptureButton
 
 
 class CustomTitleBar(QWidget):
-    """창 이동, 테마 토글, 최소화 및 닫기 기능을 지원하는 커스텀 상단 타이틀바"""
     theme_toggled = pyqtSignal()
 
-    def __init__(self, parent_window, title="morningmeal_Compet"):
+    def __init__(self, parent_window, title="morningmeal_KeyPet"):
         super().__init__(parent_window)
         self.parent_window = parent_window
         self.setObjectName("titleBar")
@@ -31,28 +30,24 @@ class CustomTitleBar(QWidget):
         layout.setContentsMargins(14, 0, 10, 0)
         layout.setSpacing(8)
 
-        # 프로그램 타이틀 라벨
         self.title_label = QLabel(title)
         self.title_label.setObjectName("titleLabel")
         layout.addWidget(self.title_label)
 
         layout.addStretch()
 
-        # 테마 전환 버튼 (Light / Dark)
         self.theme_btn = QPushButton("Mode")
         self.theme_btn.setObjectName("titleBtn")
         self.theme_btn.setFixedSize(54, 24)
         self.theme_btn.clicked.connect(self.theme_toggled.emit)
         layout.addWidget(self.theme_btn)
 
-        # 최소화 버튼
         self.min_btn = QPushButton("–")
         self.min_btn.setObjectName("titleBtn")
         self.min_btn.setFixedSize(28, 24)
         self.min_btn.clicked.connect(self.parent_window.showMinimized)
         layout.addWidget(self.min_btn)
 
-        # 닫기 버튼
         self.close_btn = QPushButton("✕")
         self.close_btn.setObjectName("titleCloseBtn")
         self.close_btn.setFixedSize(28, 24)
@@ -79,7 +74,6 @@ class SettingsWindow(QWidget):
     
     def __init__(self):
         super().__init__()
-        # OS 기본 타이틀바를 제거하고 커스텀 프레임리스 윈도우 구성
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFixedWidth(560)
@@ -99,7 +93,6 @@ class SettingsWindow(QWidget):
         I18n.language_changed.connect(self.retranslate_ui)
 
     def init_ui(self):
-        # 최외곽 배경 레이아웃 (둥근 테두리 및 섀도우 지원)
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -110,11 +103,11 @@ class SettingsWindow(QWidget):
         root_layout.setSpacing(0)
 
         # 1. 커스텀 타이틀바
-        self.title_bar = CustomTitleBar(self, "morningmeal_Compet")
+        self.title_bar = CustomTitleBar(self, "morningmeal_KeyPet")
         self.title_bar.theme_toggled.connect(self.toggle_theme)
         root_layout.addWidget(self.title_bar)
 
-        # 2. 본문 컨텐츠 영역
+        # 2. 본문 컨텐츠
         content_container = QWidget()
         content_layout = QVBoxLayout(content_container)
         content_layout.setContentsMargins(16, 12, 16, 16)
@@ -157,11 +150,17 @@ class SettingsWindow(QWidget):
         self.clamp_cb.setChecked(config_mgr.settings.get("clamp_to_screen", True))
         self.clamp_cb.toggled.connect(self.toggle_clamp_screen)
 
+        # ★ 압축/바운스 애니메이션 활성화 토글 체크박스 추가
+        self.bounce_cb = QCheckBox()
+        self.bounce_cb.setChecked(config_mgr.settings.get("enable_bounce_animation", True))
+        self.bounce_cb.toggled.connect(self.toggle_bounce_animation)
+
         gen_layout.addWidget(self.lang_label)
         gen_layout.addWidget(self.lang_combo)
         gen_layout.addWidget(self.tray_cb)
         gen_layout.addWidget(self.click_through_cb)
         gen_layout.addWidget(self.clamp_cb)
+        gen_layout.addWidget(self.bounce_cb)
         gen_layout.addStretch()
         
         # ==================== 2. 사운드 탭 ====================
@@ -222,7 +221,6 @@ class SettingsWindow(QWidget):
         ss_layout.addWidget(self.btn_open_folder, 1)
         skin_layout.addWidget(skin_select_box)
 
-        # ★ 1. 모션 압축 정도를 1% ~ 100% 범위로 조절할 수 있도록 설정
         squash_box = QGroupBox()
         self.squash_box = squash_box
         squash_layout = QHBoxLayout(squash_box)
@@ -276,7 +274,6 @@ class SettingsWindow(QWidget):
         base_layout.addLayout(h_tap2)
         skin_layout.addWidget(base_img_box)
 
-        # 4-4. 키 및 마우스 매핑 테이블
         mapping_box = QGroupBox()
         self.mapping_box = mapping_box
         map_layout = QVBoxLayout(mapping_box)
@@ -326,7 +323,6 @@ class SettingsWindow(QWidget):
         outer_layout.addWidget(self.root_widget)
 
     def toggle_theme(self):
-        """다크 / 라이트 모드 전환"""
         self.is_dark_mode = not self.is_dark_mode
         config_mgr.settings["dark_mode"] = self.is_dark_mode
         config_mgr.save_global_settings()
@@ -336,11 +332,9 @@ class SettingsWindow(QWidget):
         theme = DARK_THEME if self.is_dark_mode else LIGHT_THEME
         self.setStyleSheet(theme)
         self.title_bar.theme_btn.setText("Light" if self.is_dark_mode else "Dark")
-        # 테마 변경 시 테이블 내부 셀 위젯 스타일도 동기화 갱신
         self.refresh_table_widgets_style()
 
     def refresh_table_widgets_style(self):
-        """테이블 내부에 동적으로 추가된 셀 위젯들의 스타일을 현재 테마에 맞게 갱신"""
         bg_btn = "#27272A" if self.is_dark_mode else "#F3F4F6"
         border_btn = "#3F3F46" if self.is_dark_mode else "#E5E7EB"
         text_btn = "#F4F4F5" if self.is_dark_mode else "#1F2937"
@@ -396,6 +390,7 @@ class SettingsWindow(QWidget):
         self.tray_cb.setText(I18n.tr("tray_mode"))
         self.click_through_cb.setText(I18n.tr("click_through"))
         self.clamp_cb.setText(I18n.tr("clamp_to_screen"))
+        self.bounce_cb.setText(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
         self.add_pet_btn.setText(I18n.tr("add_pet"))
 
         self.skin_select_box.setTitle(I18n.tr("current_skin"))
@@ -449,7 +444,6 @@ class SettingsWindow(QWidget):
         self.is_loading_skin = True
         self.skin_data = config_mgr.get_skin_config(self.current_editing_skin)
 
-        # 1% ~ 100% 범위 대응
         squash_val = float(self.skin_data.get("squash_depth", 0.20))
         val_pct = max(1, min(100, int(round(squash_val * 100))))
         self.squash_slider.setValue(val_pct)
@@ -551,7 +545,6 @@ class SettingsWindow(QWidget):
             self.save_current_skin_to_file()
 
     def insert_mapping_row(self, key_text, img_text):
-        """★ 2. 매핑 행 추가 시 현재 테마와 통일된 모던 플랫 UI 스타일 적용"""
         row = self.mapping_table.rowCount()
         self.mapping_table.insertRow(row)
         self.mapping_table.setRowHeight(row, 36)
@@ -595,19 +588,16 @@ class SettingsWindow(QWidget):
             }}
         """
 
-        # 1. 키 캡처 버튼 (통일된 스타일 부여)
         btn_key = KeyCaptureButton(key_text or I18n.tr("input_waiting"))
         btn_key.setStyleSheet(btn_qss)
         btn_key.keyCaptured.connect(lambda captured: self.on_key_captured_in_row(btn_key, captured))
         self.mapping_table.setCellWidget(row, 0, btn_key)
 
-        # 2. 이미지 파일명 입력 필드
         line_edit = QLineEdit(img_text)
         line_edit.setStyleSheet(line_qss)
         line_edit.textChanged.connect(lambda _: self.save_current_skin_to_file())
         self.mapping_table.setCellWidget(row, 1, line_edit)
 
-        # 3. 찾아보기 버튼
         pick_btn = QPushButton(I18n.tr("col_browse"))
         pick_btn.setStyleSheet(btn_qss)
         pick_btn.clicked.connect(lambda _, le=line_edit: self.browse_image_for(le))
@@ -648,6 +638,11 @@ class SettingsWindow(QWidget):
         config_mgr.settings["clamp_to_screen"] = checked
         config_mgr.save_global_settings()
 
+    def toggle_bounce_animation(self, checked):
+        config_mgr.settings["enable_bounce_animation"] = checked
+        config_mgr.save_global_settings()
+        self.settings_changed.emit()
+
     def add_pet(self):
         new_pet = {"id": str(uuid.uuid4()), "skin": self.current_editing_skin, "scale": 1.0, "x": 150, "y": 150}
         config_mgr.settings["instances"].append(new_pet)
@@ -656,7 +651,6 @@ class SettingsWindow(QWidget):
         self.settings_changed.emit()
 
     def remove_pet(self, widget):
-        # 0마리까지 완전 삭제 지원
         if widget.instance_data in config_mgr.settings["instances"]:
             config_mgr.settings["instances"].remove(widget.instance_data)
             config_mgr.save_global_settings()

@@ -97,7 +97,7 @@ class PetWidget(QWidget):
         # 바인딩된 타이머가 있을 때 활성 상태가 아니면 무반응
         bound_id = self.pet_data.get("bound_timer_id", "")
         if bound_id:
-            if not activity_engine.is_timer_active(bound_id):
+            if hasattr(activity_engine, "is_timer_active") and not activity_engine.is_timer_active(bound_id):
                 return
 
         now = time.time()
@@ -114,6 +114,7 @@ class PetWidget(QWidget):
                 matched_pixmap = self.cached_pixmaps[cand]
                 break
 
+        # 타건 이미지 변경 (모양 변화는 유지)
         if matched_pixmap:
             self.current_pixmap = matched_pixmap
         elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
@@ -123,13 +124,21 @@ class PetWidget(QWidget):
                 self.current_pixmap = self.tap_pixmaps[self.tap_index]
                 self.tap_index = (self.tap_index + 1) % len(self.tap_pixmaps)
 
-        extra_squash = min(apm / 600.0, 1.0) * 0.08
-        actual_depth = min(self.squash_depth + extra_squash, 0.75)
-        self.scale_y = max(0.20, 1.0 - actual_depth)
-        self.scale_x = 1.0 + (actual_depth * 0.5)
+        # ★ 압축/바운스 애니메이션 활성화 여부 확인
+        anim_enabled = config_mgr.config.get("settings", {}).get("enable_bounce_animation", True)
+        if anim_enabled:
+            extra_squash = min(apm / 600.0, 1.0) * 0.08
+            actual_depth = min(self.squash_depth + extra_squash, 0.75)
+            self.scale_y = max(0.20, 1.0 - actual_depth)
+            self.scale_x = 1.0 + (actual_depth * 0.5)
+            self.anim_timer.start(16)
+        else:
+            # 애니메이션이 꺼져 있으면 크기 변형 없이 원본 비율 유지
+            self.scale_x, self.scale_y = 1.0, 1.0
+            if self.anim_timer.isActive():
+                self.anim_timer.stop()
 
         self.reset_timer.start(240 if matched_pixmap else 160)
-        self.anim_timer.start(16)
         self.update()
 
     def update_animation(self):
@@ -143,6 +152,7 @@ class PetWidget(QWidget):
 
     def reset_to_idle(self):
         self.current_pixmap = self.idle_pixmap
+        self.scale_x, self.scale_y = 1.0, 1.0
         self.update()
 
     def paintEvent(self, event):
@@ -156,7 +166,6 @@ class PetWidget(QWidget):
 
     # 1. 미결합 상태의 Ctrl + 휠 크기 조절 (10% ~ 150%, 5% 단위)
     def wheelEvent(self, event: QWheelEvent):
-        # 결합된 상태면 휠 크기 조절 방지
         if self.pet_data.get("bound_timer_id"):
             super().wheelEvent(event)
             return
@@ -233,7 +242,6 @@ class PetWidget(QWidget):
             
             self.move(new_pos)
 
-            # 결합된 상태라면 연결된 타이머 위젯을 펫 아래에 붙여서 함께 이동[cite: 6, 18]
             bound_id = self.pet_data.get("bound_timer_id", "")
             if bound_id:
                 for timer_w in self.get_all_timers_callback():
@@ -254,7 +262,6 @@ class PetWidget(QWidget):
 
         bound_id = self.pet_data.get("bound_timer_id", "")
         if bound_id:
-            # 결합된 타이머의 위치도 파일에 저장[cite: 18]
             for timer_w in self.get_all_timers_callback():
                 if timer_w.timer_data.get("id") == bound_id:
                     timer_w.timer_data["x"] = timer_w.x()
@@ -262,7 +269,6 @@ class PetWidget(QWidget):
                     config_mgr.save_config()
                     break
         else:
-            # 미결합 상태일 때 드롭해서 타이머에 결합
             dropped_center = self.geometry().center()
             matched_timer = None
             for t_widget in self.get_all_timers_callback():
@@ -323,7 +329,6 @@ class PetWidget(QWidget):
         elif chosen == exit_act:
             QApplication.quit()
 
-    # 3. 우클릭 스킨 변경 시 설정창 동기화 시그널 발행[cite: 6]
     def change_skin_direct(self, new_skin):
         self.pet_data["skin"] = new_skin
         config_mgr.save_config()

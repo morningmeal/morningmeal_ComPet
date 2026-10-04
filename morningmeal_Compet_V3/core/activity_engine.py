@@ -14,7 +14,9 @@ class ActivityEngine(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.last_input_time = 0.0
-        self.current_window_title = ""
+        self.current_window_id = None      # 고유 창 식별자 (HWND / macOS Window ID)
+        self.current_window_title = ""     # 최신 창 제목
+        self.current_app_name = ""         # 실행 프로세스/앱 이름 (예: Code.exe, Chrome)
         self.running = False
         
         self.my_pid = os.getpid()
@@ -32,11 +34,11 @@ class ActivityEngine(QObject):
         self.worker_thread = threading.Thread(target=self._engine_loop, daemon=True)
         self.worker_thread.start()
 
-        print("[ActivityEngine] Instant Focus Tracking Engine Started.")
+        print("[ActivityEngine] Window ID & Continuous Focus Tracking Engine Started.")
 
     def _start_listeners(self):
         def update_activity(*args):
-            # 입력이 발생했을 때만 타임스탬프 갱신
+            # 키보드/마우스 입력 발생 시 타임스탬프 갱신
             self.last_input_time = time.time()
 
         self.m_listener = mouse.Listener(
@@ -61,13 +63,22 @@ class ActivityEngine(QObject):
             # 1. 100ms 주기로 활성 창 변경 감시
             try:
                 win_info = get_active_window_info()
-                # 내 프로그램 자체(설정창, 위젯 등)는 제외하고 외부 작업 창만 감지
-                if win_info and win_info.pid != self.my_pid and win_info.title:
-                    if self.current_window_title != win_info.title:
+                
+                # 본인 프로그램(설정창, 위젯 등) 제외 및 유효한 창 확인
+                if win_info and win_info.pid != self.my_pid and (win_info.title or win_info.app_name):
+                    # ★ 창 제목(title)이 아니라 실제 창(window_id)이 전환되었을 때만 타이머 입력 시간을 리셋
+                    if self.current_window_id != win_info.window_id:
+                        self.current_window_id = win_info.window_id
                         self.current_window_title = win_info.title
-                        # 창이 바뀌면 즉시 직전 창의 입력 유효 시간을 리셋하여 즉시 정지
+                        self.current_app_name = win_info.app_name
                         self.last_input_time = 0.0
-                        self.active_window_changed.emit(win_info.title)
+                        display_name = win_info.title if win_info.title else win_info.app_name
+                        self.active_window_changed.emit(display_name)
+                    else:
+                        # 동일 창 내에서 브라우저 탭 이동이나 파일명 변경 등으로 제목만 바뀐 경우:
+                        # window_id와 기존 입력 시간(last_input_time)을 그대로 유지하여 타이머가 끊기지 않음
+                        self.current_window_title = win_info.title
+                        self.current_app_name = win_info.app_name
             except Exception:
                 pass
 
@@ -78,14 +89,13 @@ class ActivityEngine(QObject):
 
             time.sleep(0.1)
 
-    def _is_window_matched_for_timer(self, timer_data: dict, window_title: str) -> bool:
-        """해당 타이머의 그룹에 등록된 키워드가 활성 창 제목에 포함되어 있는지 엄격히 검사"""
-        if not window_title:
-            return False
-
+    def _is_window_matched_for_timer(self, timer_data: dict, window_title: str, app_name: str) -> bool:
+        """
+        해당 타이머의 그룹에 등록된 키워드가 창 제목(title) 또는 앱 이름(app_name)에 포함되는지 검사
+        - 단방향 포함 검사(clean_kw in target)를 통해 오작동 방지
+        """
         group_name = timer_data.get("group", "")
         if not group_name:
-            # 그룹이 할당되지 않은 타이머는 자동 창 추적으로 돌아가지 않음
             return False
 
         groups = config_mgr.config.get("groups", {})
@@ -94,27 +104,28 @@ class ActivityEngine(QObject):
         if not target_keywords:
             return False
 
-        title_lower = window_title.lower()
+        # 검색 대상 텍스트: "앱이름 창제목" (소문자 정규화)
+        search_target = f"{app_name} {window_title}".lower()
+
         for kw in target_keywords:
             if kw and isinstance(kw, str):
                 clean_kw = kw.strip().lower()
-                # 반드시 "활성 창 제목 안에 키워드가 부분 일치"해야 함 (역방향 매칭 제거)
-                if clean_kw and clean_kw in title_lower:
+                if clean_kw and clean_kw in search_target:
                     return True
 
         return False
 
     def is_timer_active(self, timer_id: str) -> bool:
-        """PetWidget에서 호출: 해당 타이머가 현재 매칭된 창에서 실제로 동작 중인지 판정"""
+        """PetWidget에서 호출: 해당 타이머가 현재 매칭된 작업 창에서 활발히 카운팅 중인지 판정"""
         if not timer_id:
-            return True  # 타이머에 묶이지 않은 단독 펫은 항상 반응
+            return True  # 타이머에 묶이지 않은 일반 펫은 항상 반응
 
         timers = config_mgr.config.get("timers", [])
         target_timer = next((t for t in timers if t.get("id") == timer_id), None)
         if not target_timer:
             return True
 
-        # 일시정지 상태면 정지
+        # 일시정지 상태인 경우 False
         if target_timer.get("paused", False):
             return False
 
@@ -123,28 +134,29 @@ class ActivityEngine(QObject):
         if (time.time() - self.last_input_time) > timer_timeout:
             return False
 
-        # 현재 활성 창이 타이머 그룹 키워드와 일치하는지 검사
-        return self._is_window_matched_for_timer(target_timer, self.current_window_title)
+        # 현재 창과 앱 이름이 타이머 그룹 키워드와 일치하는지 검사
+        return self._is_window_matched_for_timer(target_timer, self.current_window_title, self.current_app_name)
 
     def _evaluate_timers(self, now):
         active_title = self.current_window_title
+        app_name = self.current_app_name
         input_elapsed = now - self.last_input_time
 
         timers = config_mgr.config.get("timers", [])
         updated = {}
 
         for t in timers:
-            # 1. 일시정지 여부
+            # 1. 일시정지 여부 검사
             if t.get("paused", False):
                 continue
 
-            # 2. 유휴 시간 검사 (입력 멈춘 지 idle_timeout 초 이상이면 스킵)
+            # 2. 유휴 시간 검사 (입력이 멈춘 지 idle_timeout 초 이상이면 스킵)
             timer_timeout = t.get("idle_timeout", 5)
             if input_elapsed > timer_timeout:
                 continue
 
-            # 3. 그룹 키워드 일치 여부 검사
-            if self._is_window_matched_for_timer(t, active_title):
+            # 3. 그룹 키워드 일치 여부 검사 (창 제목 + 앱 이름 동시 검사)
+            if self._is_window_matched_for_timer(t, active_title, app_name):
                 t["elapsed_seconds"] = t.get("elapsed_seconds", 0) + 1
                 updated[t["id"]] = t["elapsed_seconds"]
 

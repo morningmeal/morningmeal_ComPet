@@ -46,7 +46,8 @@ DEFAULT_CONFIG = {
         "click_through": False,
         "clamp_to_screen": True,
         "magnetic_snap": True,
-        "snap_distance": 15
+        "snap_distance": 15,
+        "enable_bounce_animation": True  # 압축(바운스) 애니메이션 활성화 옵션
     },
     "sound": {
         "key_sound_enabled": True,

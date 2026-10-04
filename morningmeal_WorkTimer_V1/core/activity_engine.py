@@ -1,3 +1,4 @@
+# core/activity_engine.py
 import time
 import threading
 import os
@@ -13,9 +14,11 @@ class ActivityEngine(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.last_input_time = 0.0
+        self.current_window_id = None      # 고유 창 식별자 (HWND / macOS Window ID)
         self.current_window_title = ""
+        self.current_app_name = ""
         self.running = False
-        
+
         self.my_pid = os.getpid()
         self.m_listener = None
         self.k_listener = None
@@ -31,11 +34,10 @@ class ActivityEngine(QObject):
         self.worker_thread = threading.Thread(target=self._engine_loop, daemon=True)
         self.worker_thread.start()
 
-        print("[ActivityEngine] Instant Focus Tracking Engine Started.")
+        print("[ActivityEngine] Window ID & Continuous Focus Tracking Engine Started.")
 
     def _start_listeners(self):
         def update_activity(*args):
-            # 입력이 발생했을 때만 타임스탬프 갱신
             self.last_input_time = time.time()
 
         self.m_listener = mouse.Listener(
@@ -57,28 +59,76 @@ class ActivityEngine(QObject):
         while self.running:
             loop_start = time.time()
 
-            # 1. 100ms 주기로 활성 창 변경 여부를 즉각 감시
-            win_info = get_active_window_info()
-            if win_info.pid != self.my_pid and win_info.title:
-                if self.current_window_title != win_info.title:
-                    # ★ 활성 창이 바뀌는 즉시 이전 창의 입력 유효 시간을 무효화하여 즉시 정지시킴
-                    self.current_window_title = win_info.title
-                    self.last_input_time = 0.0
-                    self.active_window_changed.emit(win_info.title)
+            try:
+                win_info = get_active_window_info()
+                # 자체 창 제외 및 유효 창 확인
+                if win_info and win_info.pid != self.my_pid and (win_info.title or win_info.app_name):
+                    # 창 제목이 아닌 실제 window_id가 변경된 경우에만 전환으로 처리하고 유휴 타이머 초기화
+                    if self.current_window_id != win_info.window_id:
+                        self.current_window_id = win_info.window_id
+                        self.current_window_title = win_info.title
+                        self.current_app_name = win_info.app_name
+                        self.last_input_time = 0.0
+                        display_name = win_info.title if win_info.title else win_info.app_name
+                        self.active_window_changed.emit(display_name)
+                    else:
+                        # 동일 창 내에서 제목만 변경된 경우(탭 전환, 문서명 변경) 카운팅 유지
+                        self.current_window_title = win_info.title
+                        self.current_app_name = win_info.app_name
+            except Exception:
+                pass
 
-            # 2. 타이머 초 계산 (정확히 1초 주기로 누적 평가)
+            # 1초 주기로 타이머 누적 평가
             if loop_start - last_eval_time >= 1.0:
                 last_eval_time = loop_start
                 self._evaluate_timers(loop_start)
 
-            # 반응성을 위해 100ms(0.1초) 주기로 루프 회전
             time.sleep(0.1)
+
+    def _is_window_matched_for_timer(self, timer_data: dict, window_title: str, app_name: str) -> bool:
+        """등록된 키워드가 창 제목 또는 앱 이름에 포함되는지 단방향 검사"""
+        group_name = timer_data.get("group", "")
+        if not group_name:
+            return False
+
+        groups = config_mgr.config.get("groups", {})
+        target_keywords = groups.get(group_name, [])
+        if not target_keywords:
+            return False
+
+        search_target = f"{app_name} {window_title}".lower()
+        for kw in target_keywords:
+            if kw and isinstance(kw, str):
+                clean_kw = kw.strip().lower()
+                if clean_kw and clean_kw in search_target:
+                    return True
+
+        return False
+
+    def is_timer_active(self, timer_id: str) -> bool:
+        """타이머 활성화 여부 확인"""
+        if not timer_id:
+            return True
+
+        timers = config_mgr.config.get("timers", [])
+        target_timer = next((t for t in timers if t.get("id") == timer_id), None)
+        if not target_timer:
+            return True
+
+        if target_timer.get("paused", False):
+            return False
+
+        timer_timeout = target_timer.get("idle_timeout", 5)
+        if (time.time() - self.last_input_time) > timer_timeout:
+            return False
+
+        return self._is_window_matched_for_timer(target_timer, self.current_window_title, self.current_app_name)
 
     def _evaluate_timers(self, now):
         active_title = self.current_window_title
+        app_name = self.current_app_name
         input_elapsed = now - self.last_input_time
 
-        groups = config_mgr.config.get("groups", {})
         timers = config_mgr.config.get("timers", [])
         updated = {}
 
@@ -87,24 +137,10 @@ class ActivityEngine(QObject):
                 continue
 
             timer_timeout = t.get("idle_timeout", 5)
-            # 포커스가 바뀌어 last_input_time이 0.0이 되었거나 지정된 유휴 시간을 넘기면 즉시 통과 불가
             if input_elapsed > timer_timeout:
                 continue
 
-            group_name = t.get("group", "")
-            target_keywords = groups.get(group_name, [])
-
-            # 키워드 매칭 검사
-            matched = False
-            for kw in target_keywords:
-                if kw and kw.strip():
-                    clean_kw = kw.strip().lower()
-                    if clean_kw in active_title.lower() or active_title.lower() in clean_kw:
-                        matched = True
-                        break
-
-            # 매칭된 작업 창이고 실제 입력이 감지된 상태일 때만 1초 증가
-            if matched:
+            if self._is_window_matched_for_timer(t, active_title, app_name):
                 t["elapsed_seconds"] = t.get("elapsed_seconds", 0) + 1
                 updated[t["id"]] = t["elapsed_seconds"]
 

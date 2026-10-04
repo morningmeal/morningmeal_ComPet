@@ -95,6 +95,7 @@ class PetWidget(QWidget):
                 matched_pixmap = self.cached_pixmaps[cand_lower]
                 break
 
+        # 타건 이미지 변경
         if matched_pixmap:
             self.current_pixmap = matched_pixmap
         elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
@@ -104,15 +105,22 @@ class PetWidget(QWidget):
                 self.current_pixmap = self.tap_pixmaps[self.tap_index]
                 self.tap_index = (self.tap_index + 1) % len(self.tap_pixmaps)
 
-        extra_squash = min(apm / 600.0, 1.0) * 0.08
-        actual_depth = min(self.squash_depth + extra_squash, 0.75)
-
-        self.scale_y = max(0.20, 1.0 - actual_depth)
-        self.scale_x = 1.0 + (actual_depth * 0.5)
+        # ★ 압축/바운스 애니메이션 활성화 여부 확인
+        anim_enabled = config_mgr.settings.get("enable_bounce_animation", True)
+        if anim_enabled:
+            extra_squash = min(apm / 600.0, 1.0) * 0.08
+            actual_depth = min(self.squash_depth + extra_squash, 0.75)
+            self.scale_y = max(0.20, 1.0 - actual_depth)
+            self.scale_x = 1.0 + (actual_depth * 0.5)
+            self.anim_timer.start(16)
+        else:
+            # 애니메이션이 꺼져 있으면 원본 비율 유지
+            self.scale_x, self.scale_y = 1.0, 1.0
+            if self.anim_timer.isActive():
+                self.anim_timer.stop()
 
         reset_ms = 240 if matched_pixmap else 160
         self.reset_timer.start(reset_ms)
-        self.anim_timer.start(16)
         self.update()
 
     def update_widget_size(self):
@@ -135,7 +143,6 @@ class PetWidget(QWidget):
         self.instance_data["skin"] = new_skin
         config_mgr.save_global_settings()
         self.load_resources()
-        # 설정 창의 펫 카드 그리드 동기화 트리거
         self.scale_changed.emit(self.instance_data.get("id", ""), self.display_scale)
 
     def wheelEvent(self, event: QWheelEvent):
@@ -154,8 +161,6 @@ class PetWidget(QWidget):
         menu = QMenu(self)
         settings_action = menu.addAction(I18n.tr("tray_show"))
         duplicate_action = menu.addAction(I18n.tr("duplicate_pet"))
-
-        # 0마리 허용: 마리 수와 상관없이 항상 삭제 메뉴 노출
         remove_action = menu.addAction(I18n.tr("remove_pet"))
 
         menu.addSeparator()
@@ -199,6 +204,7 @@ class PetWidget(QWidget):
 
     def reset_to_idle(self):
         self.current_pixmap = self.idle_pixmap
+        self.scale_x, self.scale_y = 1.0, 1.0
         self.update()
 
     def paintEvent(self, event):
@@ -232,9 +238,7 @@ class PetWidget(QWidget):
         if event.buttons() == Qt.MouseButton.LeftButton:
             new_pos = event.globalPosition().toPoint() - self.drag_position
 
-            # clamp_to_screen 옵션 활성화 시 모니터 경계선 내에 고정
             if config_mgr.settings.get("clamp_to_screen", True):
-                # macOS 다중 모니터 대응 fallback
                 target_point = event.globalPosition().toPoint()
                 screen = QApplication.screenAt(target_point) or self.screen() or QApplication.primaryScreen()
                 if screen:

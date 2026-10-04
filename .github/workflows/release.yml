@@ -214,6 +214,58 @@ jobs:
           codesign --force --deep --sign - "WorkTimer-V1.app"
           zip -r "${{ github.workspace }}/WorkTimer-V1-macOS.zip" WorkTimer-V1.app
 
+      # 4. macOS 빌드 산출물 실행/서명 자동 검증 (Smoke Test)
+      - name: Verify macOS App Bundles
+        run: |
+          echo "=== 1. Codesign 검증 ==="
+          codesign --verify --verbose "${{ github.workspace }}/morningmeal_Compet_V3/dist/Compet-V3.app"
+          codesign --verify --verbose "${{ github.workspace }}/morningmeal_KeyPet_V2/dist/KeyPet-V2.app"
+          codesign --verify --verbose "${{ github.workspace }}/morningmeal_WorkTimer_V1/dist/WorkTimer-V1.app"
+
+          echo "=== 2. 실행 및 초기화 크래시 검증 (3초 스모크 테스트) ==="
+          # CI 환경에서 GUI 이벤트 루프를 헤드리스(offscreen)로 3초간 구동
+          # 만약 의존성 누락이나 문법/모듈 에러가 있으면 3초 내 비정상 종료되어 즉시 감지됨
+          export QT_QPA_PLATFORM=offscreen
+
+          echo "Testing Compet-V3 executable..."
+          "${{ github.workspace }}/morningmeal_Compet_V3/dist/Compet-V3.app/Contents/MacOS/Compet-V3" &
+          APP_PID=$!
+          sleep 3
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "Compet-V3 passed smoke test."
+            kill -TERM $APP_PID 2>/dev/null || true
+          else
+            echo "Error: Compet-V3 crashed on startup!"
+            wait $APP_PID
+            exit 1
+          fi
+
+          echo "Testing KeyPet-V2 executable..."
+          "${{ github.workspace }}/morningmeal_KeyPet_V2/dist/KeyPet-V2.app/Contents/MacOS/KeyPet-V2" &
+          APP_PID=$!
+          sleep 3
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "KeyPet-V2 passed smoke test."
+            kill -TERM $APP_PID 2>/dev/null || true
+          else
+            echo "Error: KeyPet-V2 crashed on startup!"
+            wait $APP_PID
+            exit 1
+          fi
+
+          echo "Testing WorkTimer-V1 executable..."
+          "${{ github.workspace }}/morningmeal_WorkTimer_V1/dist/WorkTimer-V1.app/Contents/MacOS/WorkTimer-V1" &
+          APP_PID=$!
+          sleep 3
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "WorkTimer-V1 passed smoke test."
+            kill -TERM $APP_PID 2>/dev/null || true
+          else
+            echo "Error: WorkTimer-V1 crashed on startup!"
+            wait $APP_PID
+            exit 1
+          fi
+
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:

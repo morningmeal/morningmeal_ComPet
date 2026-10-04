@@ -3,6 +3,7 @@ import sys
 import threading
 import time
 import ctypes
+import subprocess
 from pynput import keyboard, mouse
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -21,21 +22,24 @@ SHIFT_MAP = {
 }
 
 def check_mac_accessibility():
-    """macOS 권한 여부를 확인하고 필요 시 시스템 설정 프롬프트를 표시"""
+    """macOS 권한 여부를 확인하고 필요 시 시스템 설정 프롬프트를 표시 (외부 의존성 제거)"""
     if sys.platform != 'darwin':
         return True
     try:
         app_services = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
         is_trusted = app_services.AXIsProcessTrusted()
         if not is_trusted:
-            try:
-                from Foundation import NSDictionary
-                options = NSDictionary.dictionaryWithObject_forKey_(True, "AXTrustedCheckOptionPrompt")
-                app_services.AXIsProcessTrustedWithOptions(options)
-            except Exception:
-                pass
+            prompt_script = '''
+            tell application "System Preferences"
+                activate
+                set current pane to pane id "com.apple.preference.security"
+            end tell
+            '''
+            subprocess.Popen(["osascript", "-e", prompt_script], stderr=subprocess.DEVNULL)
+            print("[InputListener] macOS Accessibility permission is required for global input detection.")
         return bool(is_trusted)
-    except Exception:
+    except Exception as e:
+        print(f"[InputListener] Accessibility check failed: {e}")
         return False
 
 def normalize_key_token(token):
@@ -148,7 +152,6 @@ def start_global_listener():
         check_mac_accessibility()
 
     def listener_worker():
-        # macOS 런루프가 안전하게 정착되도록 0.3초 대기
         if sys.platform == 'darwin':
             time.sleep(0.3)
             

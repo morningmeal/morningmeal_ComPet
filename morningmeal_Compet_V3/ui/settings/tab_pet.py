@@ -198,11 +198,17 @@ class TabPetSettings(QWidget):
         self.click_thru_cb.setChecked(config_mgr.config.get("settings", {}).get("click_through", False))
         self.click_thru_cb.toggled.connect(lambda c: self.save_opt("click_through", c))
 
+        # 바운스(압축) 애니메이션 사용 여부 토글 체크박스 추가
+        self.bounce_cb = QCheckBox(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
+        self.bounce_cb.setChecked(config_mgr.config.get("settings", {}).get("enable_bounce_animation", True))
+        self.bounce_cb.toggled.connect(lambda c: self.save_opt("enable_bounce_animation", c))
+
         self.btn_add_pet = QPushButton(I18n.tr("add_pet"))
         self.btn_add_pet.clicked.connect(self.add_pet)
 
         top.addWidget(self.clamp_cb)
         top.addWidget(self.click_thru_cb)
+        top.addWidget(self.bounce_cb)
         top.addStretch()
         top.addWidget(self.btn_add_pet)
         layout_pets.addLayout(top)
@@ -259,16 +265,14 @@ class TabPetSettings(QWidget):
             I18n.tr("col_input"), I18n.tr("col_image"), I18n.tr("col_browse")
         ])
         
-        # 1:1:1 균등 너비 지정
         header = self.map_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.map_table.verticalHeader().setVisible(False)
-        self.map_table.setShowGrid(False)  # 투박한 격자선 제거
+        self.map_table.setShowGrid(False)
         self.map_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        # 테이블 컨테이너 및 헤더 통합 스타일시트
         is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
         t_border = "#27272A" if is_dark else "#E5E7EB"
         t_bg = "#18181B" if is_dark else "#FFFFFF"
@@ -385,7 +389,6 @@ class TabPetSettings(QWidget):
         self.map_table.insertRow(row)
         self.map_table.setRowHeight(row, 36)
 
-        # 1열: 입력 키 캡처 버튼 (통일된 카드 버튼 스타일)
         btn_key = KeyCaptureButton(key_text)
         btn_key.setFixedHeight(28)
         btn_key.setStyleSheet("""
@@ -404,7 +407,6 @@ class TabPetSettings(QWidget):
         btn_key.keyCaptured.connect(lambda k: self.on_key_captured(row, k))
         self.map_table.setCellWidget(row, 0, btn_key)
 
-        # 2열: 출력 이미지 파일명 입력창 (통일된 인풋 스타일)
         le = QLineEdit(img_text)
         le.setFixedHeight(28)
         le.setStyleSheet("""
@@ -424,7 +426,6 @@ class TabPetSettings(QWidget):
         le.textChanged.connect(lambda _: self.save_map_from_table())
         self.map_table.setCellWidget(row, 1, le)
 
-        # 3열: 파일 탐색 버튼 (통일된 액션 버튼 스타일)
         btn_pick = QPushButton(I18n.tr("col_browse"))
         btn_pick.setFixedHeight(28)
         btn_pick.setStyleSheet("""
@@ -523,27 +524,23 @@ class TabPetSettings(QWidget):
             QMessageBox.critical(self, I18n.tr("error"), str(e))
 
     def retranslate_ui(self):
-        # 1. 서브 탭 타이틀 번역
         self.sub_tabs.setTabText(0, I18n.tr("subtab_pet_list"))
         self.sub_tabs.setTabText(1, I18n.tr("subtab_skin_editor"))
         
-        # 2. 상단 옵션 & 버튼
         self.clamp_cb.setText(I18n.tr("clamp_to_screen"))
         self.click_thru_cb.setText(I18n.tr("click_through"))
+        self.bounce_cb.setText(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
         self.btn_add_pet.setText(I18n.tr("add_pet"))
         
-        # 3. 스킨 에디터 영역
         self.btn_new_skin.setText(I18n.tr("create_skin"))
         self.btn_open_folder.setText(I18n.tr("open_skin_folder"))
         self.lbl_squash_title.setText(I18n.tr("squash_depth"))
 
-        # 키 매핑 섹션 타이틀 및 테이블 컬럼 3개 번역 갱신
         self.lbl_key_map.setText(I18n.tr("key_mapping_section"))
         self.map_table.setHorizontalHeaderLabels([
             I18n.tr("col_input"), I18n.tr("col_image"), I18n.tr("col_browse")
         ])
 
-        # 테이블 내부의 '찾아보기' 버튼 번역 갱신
         for r in range(self.map_table.rowCount()):
             btn_browse = self.map_table.cellWidget(r, 2)
             if btn_browse:
@@ -554,23 +551,19 @@ class TabPetSettings(QWidget):
         self.btn_imp.setText(I18n.tr("import_skin"))
         self.btn_exp.setText(I18n.tr("export_skin"))
 
-        # 4. 펫 카드 목록 일괄 재적용
         for i in range(self.pet_grid.count()):
             w = self.pet_grid.itemAt(i).widget()
             if isinstance(w, PetCardWidget):
                 w.retranslate_ui()
 
     def apply_theme(self):
-        """테마 전환 시 펫 카드 및 키 매핑 테이블 스타일 즉시 갱신"""
         is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
         
-        # 1. 펫 카드 목록 스타일 갱신
         for i in range(self.pet_grid.count()):
             w = self.pet_grid.itemAt(i).widget()
             if isinstance(w, PetCardWidget):
                 w.update_card_style()
 
-        # 2. 키 매핑 테이블 및 헤더 색상 갱신
         t_border = "#27272A" if is_dark else "#E5E7EB"
         t_bg = "#18181B" if is_dark else "#FFFFFF"
         th_bg = "#202024" if is_dark else "#F9FAFB"
