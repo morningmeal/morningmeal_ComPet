@@ -13,7 +13,7 @@ class ActivityEngine(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.last_input_time = 0.0
+        self.last_input_time = time.time()
         self.current_window_id = None      # 고유 창 식별자 (HWND / macOS Window ID)
         self.current_window_title = ""     # 최신 창 제목
         self.current_app_name = ""         # 실행 프로세스/앱 이름 (예: Code.exe, Chrome)
@@ -66,17 +66,21 @@ class ActivityEngine(QObject):
                 
                 # 본인 프로그램(설정창, 위젯 등) 제외 및 유효한 창 확인
                 if win_info and win_info.pid != self.my_pid and (win_info.title or win_info.app_name):
-                    # ★ 창 제목(title)이 아니라 실제 창(window_id)이 전환되었을 때만 타이머 입력 시간을 리셋
+                    # 창 ID가 바뀌었을 때
                     if self.current_window_id != win_info.window_id:
                         self.current_window_id = win_info.window_id
                         self.current_window_title = win_info.title
                         self.current_app_name = win_info.app_name
-                        self.last_input_time = 0.0
+                        
+                        # ★ 창이 바뀌더라도 동일 프로그램 작업이거나 활성 입력 상태가 끊기지 않도록
+                        # last_input_time을 0.0으로 리셋하지 않고 현재 시간 유지
+                        self.last_input_time = time.time()
+                        
                         display_name = win_info.title if win_info.title else win_info.app_name
                         self.active_window_changed.emit(display_name)
                     else:
-                        # 동일 창 내에서 브라우저 탭 이동이나 파일명 변경 등으로 제목만 바뀐 경우:
-                        # window_id와 기존 입력 시간(last_input_time)을 그대로 유지하여 타이머가 끊기지 않음
+                        # 동일 창 내에서 탭 이동/문서 변경 등으로 제목만 바뀐 경우:
+                        # 창 제목 및 앱 이름을 실시간 반영하며 작업 흐름 유지
                         self.current_window_title = win_info.title
                         self.current_app_name = win_info.app_name
             except Exception:
@@ -91,8 +95,8 @@ class ActivityEngine(QObject):
 
     def _is_window_matched_for_timer(self, timer_data: dict, window_title: str, app_name: str) -> bool:
         """
-        해당 타이머의 그룹에 등록된 키워드가 창 제목(title) 또는 앱 이름(app_name)에 포함되는지 검사
-        - 단방향 포함 검사(clean_kw in target)를 통해 오작동 방지
+        해당 타이머의 그룹에 등록된 키워드가 창 제목(title) 또는 앱 이름(app_name)과 매칭되는지 판정
+        - 창 제목(탭/문서명)이 바뀌더라도 같은 앱이면 타이머가 계속 유지되도록 유연한 매칭 지원
         """
         group_name = timer_data.get("group", "")
         if not group_name:
@@ -104,14 +108,28 @@ class ActivityEngine(QObject):
         if not target_keywords:
             return False
 
-        # 검색 대상 텍스트: "앱이름 창제목" (소문자 정규화)
-        search_target = f"{app_name} {window_title}".lower()
+        cur_title = (window_title or "").strip().lower()
+        cur_app = (app_name or "").strip().lower()
+        # 앱 이름에서 확장자 제거 (.exe, .app 등)
+        clean_cur_app = cur_app.replace(".exe", "").replace(".app", "").strip()
 
         for kw in target_keywords:
-            if kw and isinstance(kw, str):
-                clean_kw = kw.strip().lower()
-                if clean_kw and clean_kw in search_target:
-                    return True
+            if not kw or not isinstance(kw, str):
+                continue
+                
+            clean_kw = kw.strip().lower()
+            if not clean_kw:
+                continue
+
+            # 1. 등록 키워드가 현재 창 제목이나 앱 이름에 직접 포함되는 경우
+            if clean_kw in cur_title or clean_kw in cur_app or clean_kw in clean_cur_app:
+                return True
+
+            # 2. 클릭 지정으로 긴 창 제목("파일명 - 프로그램명")이 등록되어 있는데,
+            #    사용자가 탭을 바꿔 창 제목이 달라진 경우:
+            #    등록 키워드 안에 현재 실행 중인 앱 이름(또는 핵심 프로세스명)이 들어있다면 동일 작업으로 인정
+            if len(clean_cur_app) >= 3 and clean_cur_app in clean_kw:
+                return True
 
         return False
 
@@ -129,7 +147,7 @@ class ActivityEngine(QObject):
         if target_timer.get("paused", False):
             return False
 
-        # 유휴 시간 초과 검사 (창 전환 직후이거나 idle_timeout 초과 시 False)
+        # 유휴 시간 초과 검사 (입력이 멈춘 지 idle_timeout 초 초과 시 False)
         timer_timeout = target_timer.get("idle_timeout", 5)
         if (time.time() - self.last_input_time) > timer_timeout:
             return False
@@ -155,7 +173,7 @@ class ActivityEngine(QObject):
             if input_elapsed > timer_timeout:
                 continue
 
-            # 3. 그룹 키워드 일치 여부 검사 (창 제목 + 앱 이름 동시 검사)
+            # 3. 그룹 키워드 일치 여부 검사 (창 제목 변경 대응)
             if self._is_window_matched_for_timer(t, active_title, app_name):
                 t["elapsed_seconds"] = t.get("elapsed_seconds", 0) + 1
                 updated[t["id"]] = t["elapsed_seconds"]

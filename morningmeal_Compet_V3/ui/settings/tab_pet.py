@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QInputDialog, QAbstractSpinBox, QCheckBox, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl
-from PyQt6.QtGui import QDesktopServices, QPixmap
+from PyQt6.QtGui import QDesktopServices, QPixmap, QFontMetrics
 from core.config_manager import config_mgr, SKINS_DIR
 from core.i18n import I18n
 from ui.components import KeyCaptureButton
@@ -171,6 +171,7 @@ class TabPetSettings(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_editing_skin = "default"
+        self.is_loading_skin = False
         self.init_ui()
         self.load_skin_list()
         self.load_current_skin_config()
@@ -180,11 +181,10 @@ class TabPetSettings(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 8, 4, 4)
 
-        # 3개 서브 탭 (일반, 활성 펫 관리, 스킨 에디터)
         self.sub_tabs = QTabWidget()
         self.sub_tabs.setObjectName("subTabWidget")
 
-        # ---------------- 1. 펫 일반 설정 서브 탭 ----------------
+        # ==================== 1. 일반 설정 서브 탭 ====================
         self.sub_page_general = QWidget()
         layout_general = QVBoxLayout(self.sub_page_general)
         layout_general.setContentsMargins(14, 14, 14, 14)
@@ -202,7 +202,7 @@ class TabPetSettings(QWidget):
         layout_general.addWidget(self.click_thru_cb)
         layout_general.addStretch()
 
-        # ---------------- 2. 펫 인스턴스 관리 서브 탭 ----------------
+        # ==================== 2. 활성 펫 관리 서브 탭 ====================
         self.sub_page_pets = QWidget()
         layout_pets = QVBoxLayout(self.sub_page_pets)
         layout_pets.setContentsMargins(10, 10, 10, 10)
@@ -226,12 +226,16 @@ class TabPetSettings(QWidget):
         scroll_pets.setWidget(p_content)
         layout_pets.addWidget(scroll_pets)
 
-        # ---------------- 3. 스킨 에디터 서브 탭 ----------------
+        # ==================== 3. 스킨 에디터 서브 탭 ====================
         self.sub_page_skin = QWidget()
-        layout_skin = QVBoxLayout(self.sub_page_skin)
+        tab_skin_scroll = QScrollArea()
+        tab_skin_scroll.setWidgetResizable(True)
+        skin_content = QWidget()
+        layout_skin = QVBoxLayout(skin_content)
         layout_skin.setContentsMargins(10, 10, 10, 10)
-        layout_skin.setSpacing(10)
+        layout_skin.setSpacing(14)
 
+        # 상단 스킨 선택 바
         bar_s = QHBoxLayout()
         self.skin_combo = QComboBox()
         self.skin_combo.currentTextChanged.connect(self.on_skin_selected)
@@ -245,11 +249,12 @@ class TabPetSettings(QWidget):
         bar_s.addWidget(self.btn_open_folder, 1)
         layout_skin.addLayout(bar_s)
 
-        # 스킨별 바운스(압축) 애니메이션 활성화 체크박스
+        # 스킨별 바운스(압축) 애니메이션 On/Off 체크박스
         self.skin_bounce_cb = QCheckBox(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
         self.skin_bounce_cb.toggled.connect(self.on_skin_bounce_toggled)
         layout_skin.addWidget(self.skin_bounce_cb)
 
+        # 모션 압축 강도 슬라이더
         squash_layout = QHBoxLayout()
         self.lbl_squash_title = QLabel(I18n.tr("squash_depth"))
         self.squash_slider = QSlider(Qt.Orientation.Horizontal)
@@ -262,6 +267,136 @@ class TabPetSettings(QWidget):
         squash_layout.addWidget(self.squash_lbl)
         layout_skin.addLayout(squash_layout)
 
+        # ★ [3열 균등 정렬] 기본 모션 이미지 설정 영역 (배경/윤곽선 없음)
+        self.base_motions_widget = QWidget()
+        self.base_motions_widget.setObjectName("baseMotionsWidget")
+        self.base_motions_widget.setStyleSheet("#baseMotionsWidget { background: transparent; border: none; }")
+        
+        # QGridLayout을 통해 3개 컬럼의 너비를 동일 비율(1:1:1)로 균등 분할
+        motions_grid = QGridLayout(self.base_motions_widget)
+        motions_grid.setContentsMargins(0, 4, 0, 4)
+        motions_grid.setHorizontalSpacing(16)
+        motions_grid.setVerticalSpacing(0)
+        motions_grid.setColumnStretch(0, 1)
+        motions_grid.setColumnStretch(1, 1)
+        motions_grid.setColumnStretch(2, 1)
+
+        preview_qss = "background-color: rgba(128,128,128,0.06); border: 1px dashed rgba(150,150,150,0.3); border-radius: 8px;"
+        btn_qss = """
+            QPushButton {
+                background-color: #F3F4F6;
+                border: 1px solid #D1D5DB;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 500;
+                color: #374151;
+            }
+            QPushButton:hover {
+                background-color: #E5E7EB;
+                color: #111827;
+            }
+        """
+
+        # 1) 열 1: idle
+        widget_col_idle = QWidget()
+        col_idle = QVBoxLayout(widget_col_idle)
+        col_idle.setContentsMargins(0, 0, 0, 0)
+        col_idle.setSpacing(6)
+        col_idle.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        self.idle_label = QLabel(I18n.tr("idle_image"))
+        self.idle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.idle_label.setStyleSheet("font-weight: 600; font-size: 11px;")
+        
+        self.idle_preview = QLabel("No Img")
+        self.idle_preview.setFixedSize(96, 96)
+        self.idle_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.idle_preview.setStyleSheet(preview_qss)
+
+        self.idle_name_lbl = QLabel("idle.png")
+        self.idle_name_lbl.setFixedWidth(130)
+        self.idle_name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.idle_name_lbl.setStyleSheet("font-size: 11px; color: #64748B; padding: 2px;")
+
+        self.idle_browse_btn = QPushButton(I18n.tr("browse"))
+        self.idle_browse_btn.setFixedWidth(96)
+        self.idle_browse_btn.setStyleSheet(btn_qss)
+        self.idle_browse_btn.clicked.connect(lambda: self.browse_base_image("idle"))
+
+        col_idle.addWidget(self.idle_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_idle.addWidget(self.idle_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_idle.addWidget(self.idle_name_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_idle.addWidget(self.idle_browse_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # 2) 열 2: tap1 (왼손)
+        widget_col_tap1 = QWidget()
+        col_tap1 = QVBoxLayout(widget_col_tap1)
+        col_tap1.setContentsMargins(0, 0, 0, 0)
+        col_tap1.setSpacing(6)
+        col_tap1.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        self.tap1_label = QLabel(I18n.tr("tap1_image"))
+        self.tap1_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tap1_label.setStyleSheet("font-weight: 600; font-size: 11px;")
+
+        self.tap1_preview = QLabel("No Img")
+        self.tap1_preview.setFixedSize(96, 96)
+        self.tap1_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tap1_preview.setStyleSheet(preview_qss)
+
+        self.tap1_name_lbl = QLabel("tap_left.png")
+        self.tap1_name_lbl.setFixedWidth(130)
+        self.tap1_name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tap1_name_lbl.setStyleSheet("font-size: 11px; color: #64748B; padding: 2px;")
+
+        self.tap1_browse_btn = QPushButton(I18n.tr("browse"))
+        self.tap1_browse_btn.setFixedWidth(96)
+        self.tap1_browse_btn.setStyleSheet(btn_qss)
+        self.tap1_browse_btn.clicked.connect(lambda: self.browse_base_image("tap1"))
+
+        col_tap1.addWidget(self.tap1_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_tap1.addWidget(self.tap1_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_tap1.addWidget(self.tap1_name_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_tap1.addWidget(self.tap1_browse_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # 3) 열 3: tap2 (오른손)
+        widget_col_tap2 = QWidget()
+        col_tap2 = QVBoxLayout(widget_col_tap2)
+        col_tap2.setContentsMargins(0, 0, 0, 0)
+        col_tap2.setSpacing(6)
+        col_tap2.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        self.tap2_label = QLabel(I18n.tr("tap2_image"))
+        self.tap2_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tap2_label.setStyleSheet("font-weight: 600; font-size: 11px;")
+
+        self.tap2_preview = QLabel("No Img")
+        self.tap2_preview.setFixedSize(96, 96)
+        self.tap2_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tap2_preview.setStyleSheet(preview_qss)
+
+        self.tap2_name_lbl = QLabel("tap_right.png")
+        self.tap2_name_lbl.setFixedWidth(130)
+        self.tap2_name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tap2_name_lbl.setStyleSheet("font-size: 11px; color: #64748B; padding: 2px;")
+
+        self.tap2_browse_btn = QPushButton(I18n.tr("browse"))
+        self.tap2_browse_btn.setFixedWidth(96)
+        self.tap2_browse_btn.setStyleSheet(btn_qss)
+        self.tap2_browse_btn.clicked.connect(lambda: self.browse_base_image("tap2"))
+
+        col_tap2.addWidget(self.tap2_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_tap2.addWidget(self.tap2_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_tap2.addWidget(self.tap2_name_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+        col_tap2.addWidget(self.tap2_browse_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        motions_grid.addWidget(widget_col_idle, 0, 0, Qt.AlignmentFlag.AlignHCenter)
+        motions_grid.addWidget(widget_col_tap1, 0, 1, Qt.AlignmentFlag.AlignHCenter)
+        motions_grid.addWidget(widget_col_tap2, 0, 2, Qt.AlignmentFlag.AlignHCenter)
+        layout_skin.addWidget(self.base_motions_widget)
+
+        # 키 매핑 섹션 라벨 및 테이블
         self.lbl_key_map = QLabel(I18n.tr("key_mapping_section"))
         self.lbl_key_map.setStyleSheet("font-weight: 600; font-size: 12px; margin-top: 4px; color: #4B5563;")
         layout_skin.addWidget(self.lbl_key_map)
@@ -270,7 +405,6 @@ class TabPetSettings(QWidget):
         self.map_table.setHorizontalHeaderLabels([
             I18n.tr("col_input"), I18n.tr("col_image"), I18n.tr("col_browse")
         ])
-        
         header = self.map_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -321,6 +455,11 @@ class TabPetSettings(QWidget):
         btn_map_box.addWidget(self.btn_exp)
         layout_skin.addLayout(btn_map_box)
 
+        tab_skin_scroll.setWidget(skin_content)
+        skin_sub_layout = QVBoxLayout(self.sub_page_skin)
+        skin_sub_layout.setContentsMargins(0, 0, 0, 0)
+        skin_sub_layout.addWidget(tab_skin_scroll)
+
         # 3개 서브 탭 등록
         self.sub_tabs.addTab(self.sub_page_general, I18n.tr("tab_general"))
         self.sub_tabs.addTab(self.sub_page_pets, I18n.tr("subtab_pet_list"))
@@ -367,7 +506,8 @@ class TabPetSettings(QWidget):
         self.skin_combo.clear()
         skins = [d for d in os.listdir(SKINS_DIR) if os.path.isdir(os.path.join(SKINS_DIR, d))]
         self.skin_combo.addItems(sorted(skins))
-        if self.current_editing_skin in skins: self.skin_combo.setCurrentText(self.current_editing_skin)
+        if self.current_editing_skin in skins:
+            self.skin_combo.setCurrentText(self.current_editing_skin)
         self.skin_combo.blockSignals(False)
 
     def on_skin_selected(self, skin_name):
@@ -375,22 +515,63 @@ class TabPetSettings(QWidget):
         self.current_editing_skin = skin_name
         self.load_current_skin_config()
 
+    def _set_elided_filename(self, label: QLabel, full_name: str, max_width: int = 120):
+        """긴 파일명을 가운데 말줄임표(...)로 처리하고 툴팁에 원본 전체 파일명 표시"""
+        label.setToolTip(full_name)
+        fm = QFontMetrics(label.font())
+        elided = fm.elidedText(full_name, Qt.TextElideMode.ElideMiddle, max_width)
+        label.setText(elided)
+
+    def _update_motion_preview(self, label: QLabel, filename: str):
+        """기본 모션 이미지의 미리보기 썸네일 갱신"""
+        s_dir = os.path.join(SKINS_DIR, self.current_editing_skin)
+        f_path = os.path.join(s_dir, filename)
+        if filename and os.path.exists(f_path):
+            pix = QPixmap(f_path)
+            if not pix.isNull():
+                label.setPixmap(pix.scaled(86, 86, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                return
+        label.clear()
+        label.setText("No Img")
+
     def load_current_skin_config(self):
+        self.is_loading_skin = True
         conf = config_mgr.get_skin_config(self.current_editing_skin)
+        
+        # 1. 압축 슬라이더
         s_val = int(conf.get("squash_depth", 0.20) * 100)
         self.squash_slider.setValue(s_val)
         self.squash_lbl.setText(f"{s_val}%")
         
-        # 현재 스킨의 바운스 활성화 여부 동기화
+        # 2. 스킨별 바운스 애니메이션 체크박스
         self.skin_bounce_cb.blockSignals(True)
         self.skin_bounce_cb.setChecked(conf.get("enable_bounce", True))
         self.skin_bounce_cb.blockSignals(False)
 
+        # 3. 기본 모션 이미지 파일명(말줄임 적용) 및 미리보기 갱신
+        idle_file = conf.get("idle_image", "idle.png")
+        tap_list = conf.get("tap_images", ["tap_left.png", "tap_right.png"])
+        t1 = tap_list[0] if len(tap_list) > 0 else "tap_left.png"
+        t2 = tap_list[1] if len(tap_list) > 1 else t1
+
+        self._set_elided_filename(self.idle_name_lbl, idle_file, 120)
+        self._update_motion_preview(self.idle_preview, idle_file)
+
+        self._set_elided_filename(self.tap1_name_lbl, t1, 120)
+        self._update_motion_preview(self.tap1_preview, t1)
+
+        self._set_elided_filename(self.tap2_name_lbl, t2, 120)
+        self._update_motion_preview(self.tap2_preview, t2)
+
+        # 4. 키 매핑 테이블 로드
         self.map_table.setRowCount(0)
         for k, v in conf.get("key_mappings", {}).items():
             self.insert_map_row(k, v)
 
+        self.is_loading_skin = False
+
     def on_skin_bounce_toggled(self, checked):
+        if self.is_loading_skin: return
         conf = config_mgr.get_skin_config(self.current_editing_skin)
         conf["enable_bounce"] = checked
         config_mgr.save_skin_config(self.current_editing_skin, conf)
@@ -398,8 +579,39 @@ class TabPetSettings(QWidget):
 
     def on_squash_slider(self, val):
         self.squash_lbl.setText(f"{val}%")
+        if self.is_loading_skin: return
         conf = config_mgr.get_skin_config(self.current_editing_skin)
         conf["squash_depth"] = round(val / 100.0, 2)
+        config_mgr.save_skin_config(self.current_editing_skin, conf)
+        self.settings_changed.emit()
+
+    def browse_base_image(self, motion_type: str):
+        """버튼을 통해서만 기본 모션 파일 설정 및 즉시 반영"""
+        s_dir = os.path.join(SKINS_DIR, self.current_editing_skin)
+        path, _ = QFileDialog.getOpenFileName(self, I18n.tr("image_filter"), s_dir, I18n.tr("image_filter"))
+        if not path:
+            return
+
+        file_name = os.path.basename(path)
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+
+        if motion_type == "idle":
+            conf["idle_image"] = file_name
+            self._set_elided_filename(self.idle_name_lbl, file_name, 120)
+            self._update_motion_preview(self.idle_preview, file_name)
+        elif motion_type == "tap1":
+            tap_list = conf.get("tap_images", ["tap_left.png", "tap_right.png"])
+            t2 = tap_list[1] if len(tap_list) > 1 else tap_list[0]
+            conf["tap_images"] = [file_name, t2]
+            self._set_elided_filename(self.tap1_name_lbl, file_name, 120)
+            self._update_motion_preview(self.tap1_preview, file_name)
+        elif motion_type == "tap2":
+            tap_list = conf.get("tap_images", ["tap_left.png", "tap_right.png"])
+            t1 = tap_list[0] if len(tap_list) > 0 else "tap_left.png"
+            conf["tap_images"] = [t1, file_name]
+            self._set_elided_filename(self.tap2_name_lbl, file_name, 120)
+            self._update_motion_preview(self.tap2_preview, file_name)
+
         config_mgr.save_skin_config(self.current_editing_skin, conf)
         self.settings_changed.emit()
 
@@ -474,7 +686,6 @@ class TabPetSettings(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, I18n.tr("image_filter"), s_dir, I18n.tr("image_filter"))
         if path:
             target_le.setText(os.path.basename(path))
-            self.save_map_from_table()
 
     def add_mapping_row(self):
         self.insert_map_row("space", "tap_left.png")
@@ -487,6 +698,7 @@ class TabPetSettings(QWidget):
             self.save_map_from_table()
 
     def save_map_from_table(self):
+        if self.is_loading_skin: return
         maps = {}
         for r in range(self.map_table.rowCount()):
             kw = self.map_table.cellWidget(r, 0)
@@ -561,6 +773,13 @@ class TabPetSettings(QWidget):
         self.btn_open_folder.setText(I18n.tr("open_skin_folder"))
         self.skin_bounce_cb.setText(I18n.tr("enable_bounce_animation", "바운스 애니메이션"))
         self.lbl_squash_title.setText(I18n.tr("squash_depth"))
+
+        self.idle_label.setText(I18n.tr("idle_image"))
+        self.tap1_label.setText(I18n.tr("tap1_image"))
+        self.tap2_label.setText(I18n.tr("tap2_image"))
+        self.idle_browse_btn.setText(I18n.tr("browse"))
+        self.tap1_browse_btn.setText(I18n.tr("browse"))
+        self.tap2_browse_btn.setText(I18n.tr("browse"))
 
         self.lbl_key_map.setText(I18n.tr("key_mapping_section"))
         self.map_table.setHorizontalHeaderLabels([
