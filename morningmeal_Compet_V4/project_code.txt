@@ -1,0 +1,4662 @@
+
+==================================================
+FILE: core/__init__.py
+==================================================
+
+
+
+==================================================
+FILE: core/activity_engine.py
+==================================================
+
+# core/activity_engine.py
+import sys
+import time
+import threading
+import os
+from PyQt6.QtCore import QObject, pyqtSignal
+from core.config_manager import config_mgr
+from core.window_tracker import get_active_window_info
+from core.input_engine import get_last_activity_time, mark_activity
+
+class ActivityEngine(QObject):
+    tick = pyqtSignal(dict)
+    active_window_changed = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_window_id = None
+        self.current_window_title = ""
+        self.current_app_name = ""
+        self.running = False
+        self.my_pid = os.getpid()
+        self.worker_thread = None
+        self._last_disk_save_time = time.time()
+
+    def start(self):
+        if self.running: return
+        self.running = True
+        self.worker_thread = threading.Thread(target=self._engine_loop, daemon=True)
+        self.worker_thread.start()
+
+    def _engine_loop(self):
+        last_eval_time = time.time()
+        last_window_poll_time = 0.0
+        poll_interval = 0.7 if sys.platform == 'darwin' else 0.15
+
+        while self.running:
+            now = time.time()
+            if now - last_window_poll_time >= poll_interval:
+                last_window_poll_time = now
+                try:
+                    win_info = get_active_window_info()
+                    if win_info and win_info.pid != self.my_pid:
+                        if self.current_window_id != win_info.window_id:
+                            self.current_window_id = win_info.window_id
+                            self.current_window_title = win_info.title
+                            self.current_app_name = win_info.app_name
+                            mark_activity()
+                            self.active_window_changed.emit(win_info.format_slot_string())
+                        else:
+                            self.current_window_title = win_info.title
+                            if win_info.app_name:
+                                self.current_app_name = win_info.app_name
+                except Exception:
+                    pass
+
+            if now - last_eval_time >= 1.0:
+                last_eval_time = now
+                self._evaluate_timers(now)
+
+            time.sleep(0.05)
+
+    @staticmethod
+    def _clean_app_token(app_str: str) -> str:
+        s = (app_str or "").strip().lower()
+        for ext in (".exe", ".app", ".bin"):
+            if s.endswith(ext):
+                s = s[:-len(ext)].strip()
+        return s
+
+    def _is_window_matched_for_timer(self, timer_data: dict, window_title: str, app_name: str) -> bool:
+        group_name = timer_data.get("group", "")
+        if not group_name: return False
+        groups = config_mgr.config.get("groups", {})
+        target_keywords = groups.get(group_name, [])
+        if not target_keywords: return False
+
+        cur_title = (window_title or "").strip().lower()
+        cur_app = (app_name or "").strip().lower()
+        clean_cur_app = self._clean_app_token(cur_app)
+        if not cur_title and not cur_app: return False
+
+        for kw in target_keywords:
+            if not kw or not isinstance(kw, str): continue
+            raw_kw = kw.strip()
+            if not raw_kw: continue
+
+            if raw_kw.startswith("[") and "]" in raw_kw:
+                close_idx = raw_kw.find("]")
+                slot_app = raw_kw[1:close_idx].strip().lower()
+                slot_title = raw_kw[close_idx + 1:].strip().lower()
+                clean_slot_app = self._clean_app_token(slot_app)
+                if clean_slot_app and clean_cur_app and (clean_slot_app == clean_cur_app or slot_app == cur_app):
+                    return True
+                if slot_title and cur_title and (slot_title in cur_title or cur_title in slot_title):
+                    return True
+
+            clean_kw = raw_kw.lower()
+            clean_kw_app = self._clean_app_token(clean_kw)
+            if cur_title and clean_kw in cur_title: return True
+            if cur_app and (clean_kw in cur_app or (clean_kw_app and clean_kw_app == clean_cur_app)): return True
+            if len(clean_cur_app) >= 3 and clean_cur_app in clean_kw: return True
+
+        return False
+
+    def is_timer_active(self, timer_id: str) -> bool:
+        if not timer_id: return True
+        timers = config_mgr.config.get("timers", [])
+        target_timer = next((t for t in timers if t.get("id") == timer_id), None)
+        if not target_timer: return True
+        if target_timer.get("paused", False): return False
+        timer_timeout = target_timer.get("idle_timeout", 5)
+        if (time.time() - get_last_activity_time()) > timer_timeout: return False
+        return self._is_window_matched_for_timer(target_timer, self.current_window_title, self.current_app_name)
+
+    def _evaluate_timers(self, now):
+        active_title = self.current_window_title
+        app_name = self.current_app_name
+        input_elapsed = now - get_last_activity_time()
+        timers = config_mgr.config.get("timers", [])
+        updated = {}
+
+        for t in timers:
+            if t.get("paused", False): continue
+            timer_timeout = t.get("idle_timeout", 5)
+            if input_elapsed > timer_timeout: continue
+            if self._is_window_matched_for_timer(t, active_title, app_name):
+                t["elapsed_seconds"] = t.get("elapsed_seconds", 0) + 1
+                updated[t["id"]] = t["elapsed_seconds"]
+
+        if updated:
+            self.tick.emit(updated)
+            if now - self._last_disk_save_time >= 30.0:
+                self._last_disk_save_time = now
+                config_mgr.save_config()
+
+activity_engine = ActivityEngine()
+
+==================================================
+FILE: core/config_manager.py
+==================================================
+
+# core/config_manager.py
+import os
+import sys
+import json
+import uuid
+import shutil
+import threading
+
+def get_bundle_dir():
+    if getattr(sys, 'frozen', False):
+        if hasattr(sys, '_MEIPASS'):
+            return sys._MEIPASS
+        exe_dir = os.path.dirname(sys.executable)
+        internal_dir = os.path.join(exe_dir, "_internal")
+        if os.path.exists(internal_dir):
+            return internal_dir
+        if sys.platform == 'darwin':
+            res_dir = os.path.join(os.path.dirname(exe_dir), "Resources")
+            if os.path.exists(res_dir):
+                return res_dir
+        return exe_dir
+    else:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+BUNDLE_DIR = get_bundle_dir()
+
+if sys.platform == 'darwin':
+    USER_DATA_DIR = os.path.expanduser("~/Library/Application Support/morningmeal_ComPet")
+else:
+    USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".morningmeal_ComPet")
+
+CONFIG_PATH = os.path.join(USER_DATA_DIR, "config.json")
+SKINS_DIR = os.path.join(USER_DATA_DIR, "skins")
+USER_SOUNDS_DIR = os.path.join(USER_DATA_DIR, "sounds")
+CRASH_LOG_PATH = os.path.join(USER_DATA_DIR, "crash_log.txt")
+
+BUNDLE_SKINS_DIR = os.path.join(BUNDLE_DIR, "assets", "skins")
+BUNDLE_SOUNDS_DIR = os.path.join(BUNDLE_DIR, "assets", "sounds")
+
+DEFAULT_CONFIG = {
+    "settings": {
+        "language": "auto",
+        "dark_mode": False,
+        "tray_mode": False,
+        "click_through": False,
+        "clamp_to_screen": True,
+        "magnetic_snap": True,
+        "snap_distance": 15
+    },
+    "sound": {
+        "key_sound_enabled": True,
+        "key_volume": 50,
+        "key_sound_path": "",
+        "click_sound_enabled": True,
+        "click_volume": 50,
+        "click_sound_path": ""
+    },
+    "groups": {
+        "기본 그룹": ["", "", ""]
+    },
+    "timers": [
+        {
+            "id": str(uuid.uuid4()),
+            "name": "작업 1",
+            "group": "기본 그룹",
+            "idle_timeout": 5,
+            "elapsed_seconds": 0,
+            "x": 200,
+            "y": 300,
+            "paused": False
+        }
+    ],
+    "pets": []
+}
+
+class ConfigManager:
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._ensure_dirs()
+        self.config = self.load_config()
+
+    def _ensure_dirs(self):
+        os.makedirs(USER_DATA_DIR, exist_ok=True)
+        os.makedirs(SKINS_DIR, exist_ok=True)
+        os.makedirs(USER_SOUNDS_DIR, exist_ok=True)
+
+        default_user_skin = os.path.join(SKINS_DIR, "default")
+        bundle_default_skin = os.path.join(BUNDLE_SKINS_DIR, "default")
+
+        if not os.path.exists(default_user_skin):
+            if os.path.exists(bundle_default_skin):
+                shutil.copytree(bundle_default_skin, default_user_skin)
+            else:
+                os.makedirs(default_user_skin, exist_ok=True)
+                self.save_skin_config("default", {
+                    "name": "default",
+                    "squash_depth": 0.20,
+                    "enable_bounce": True,
+                    "idle_image": "idle.png",
+                    "tap_images": ["tap_left.png", "tap_right.png"],
+                    "key_mappings": {}
+                })
+
+    def load_config(self):
+        with self._lock:
+            data = json.loads(json.dumps(DEFAULT_CONFIG))
+            if os.path.exists(CONFIG_PATH):
+                try:
+                    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                        for k, v in loaded.items():
+                            if isinstance(v, dict) and k in data:
+                                data[k].update(v)
+                            else:
+                                data[k] = v
+                except Exception as e:
+                    print(f"[ConfigManager] Load error: {e}")
+
+            if not data.get("pets"):
+                first_timer_id = data["timers"][0]["id"] if data.get("timers") else ""
+                data["pets"].append({
+                    "id": str(uuid.uuid4()),
+                    "skin": "default",
+                    "scale": 1.0,
+                    "x": 200,
+                    "y": 200,
+                    "bound_timer_id": first_timer_id
+                })
+            return data
+
+    def save_config(self):
+        with self._lock:
+            tmp_path = CONFIG_PATH + ".tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, CONFIG_PATH)
+            except Exception as e:
+                print(f"[ConfigManager] Save error: {e}")
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+
+    def get_skin_config(self, skin_name):
+        with self._lock:
+            path = os.path.join(SKINS_DIR, skin_name, "config.json")
+            conf = {
+                "name": skin_name,
+                "squash_depth": 0.20,
+                "enable_bounce": True,
+                "idle_image": "idle.png",
+                "tap_images": ["tap_left.png", "tap_right.png"],
+                "key_mappings": {}
+            }
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        conf.update(json.load(f))
+                except Exception:
+                    pass
+            return conf
+
+    def save_skin_config(self, skin_name, data):
+        with self._lock:
+            target_dir = os.path.join(SKINS_DIR, skin_name)
+            os.makedirs(target_dir, exist_ok=True)
+            path = os.path.join(target_dir, "config.json")
+            tmp_path = path + ".tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, path)
+            except Exception as e:
+                print(f"[ConfigManager] Skin config save error for {skin_name}: {e}")
+
+config_mgr = ConfigManager()
+
+==================================================
+FILE: core/i18n.py
+==================================================
+
+# core/i18n.py
+from PyQt6.QtCore import QLocale, QObject, pyqtSignal
+
+TRANSLATIONS = {
+    "ko": {
+        "app_title": "환경설정",
+        "tab_timer": "워크 타이머",
+        "tab_pet": "타이핑 펫",
+        "tab_sound": "타이핑 사운드",
+        "tab_general": "일반 설정",
+        
+        # 타이머 탭
+        "subtab_timer_list": "타이머 목록",
+        "subtab_window_groups": "탭 그룹",
+        "add_timer": "새 타이머 추가",
+        "default_timer_name": "작업",
+        "group_label": "그룹:",
+        "idle_label": "유휴:",
+        "unit_seconds": "초",
+        "reset": "초기화",
+        "pause": "정지",
+        "resume": "재개",
+        "delete": "삭제",
+        "del_timer_title": "타이머 삭제",
+        "del_timer_msg": "'{name}' 타이머를 정말 삭제하시겠습니까?",
+        "reset_confirm_title": "시간 초기화",
+        "reset_confirm_msg": "해당 타이머의 시간을 0으로 초기화하시겠습니까?",
+        "create_group": "그룹 생성",
+        "default_group_name": "기본 그룹",
+        "slot": "번 창",
+        "slot_placeholder": "창 제목 입력 또는 클릭 지정",
+        "pick_window": "클릭 지정",
+        "waiting_click": "클릭 대기 중...",
+        "clear": "비우기",
+        "del_group": "삭제",
+        "del_group_msg": "'{name}' 그룹을 정말 삭제하시겠습니까?",
+        "no_group_available": "그룹 없음",
+        "group_exists_warn": "이미 존재하는 그룹명입니다.",
+        "magnetic_snap": "타이머 자석 스냅 활성화",
+
+        # 펫 탭
+        "subtab_pet_list": "활성 펫 관리",
+        "subtab_skin_editor": "스킨 에디터",
+        "add_pet": "새 펫 추가",
+        "skin_label": "스킨:",
+        "size_label": "크기:",
+        "current_skin": "편집 스킨",
+        "create_skin": "새 스킨 생성",
+        "create_skin_prompt": "새 스킨 이름을 입력하세요:",
+        "skin_exists_warn": "이미 존재하는 스킨 이름입니다.",
+        "open_skin_folder": "폴더 열기",
+        "squash_depth": "모션 압축 강도",
+        "idle_image": "대기 상태 (Idle)",
+        "tap1_image": "타건 1 (왼손)",
+        "tap2_image": "타건 2 (오른손)",
+        "browse": "찾아보기",
+        "key_mapping_section": "키 매핑 목록",
+        "add_mapping": "매핑 추가",
+        "del_mapping": "삭제",
+        "col_input": "감지 키",
+        "col_image": "출력 이미지",
+        "col_browse": "파일 탐색",
+        "input_waiting": "입력 대기",
+        "input_detecting": "입력 감지 중...",
+        "skin_pkg_manage": "스킨 패키지",
+        "import_skin": "가져오기",
+        "export_skin": "내보내기",
+        "clamp_to_screen": "펫 화면 밖 탈출 방지",
+        "click_through": "마우스 클릭 관통 (무시)",
+        "enable_bounce_animation": "바운스 애니메이션 사용",
+        "bound_timer_label": "결합 타이머",
+        "unbound": "미결합 (자유 모드)",
+        "remove_pet": "삭제",
+
+        # 사운드 탭
+        "key_sound": "키보드 타건음",
+        "click_sound": "마우스 클릭음",
+        "sound_enable": "사운드 활성화",
+        "volume": "볼륨",
+        "select_sound": "사운드 선택",
+        "upload_sound": "파일 업로드",
+        "upload_err": "2.5초 이하의 WAV 파일만 지원됩니다.",
+
+        # 공통 & 메뉴
+        "language": "언어",
+        "tray_mode": "작업표시줄에 위젯 표시 숨기기 (트레이 모드)",
+        "open_settings": "설정 열기",
+        "bind_timer": "타이머와 결합",
+        "unbind_timer": "타이머와 분리",
+        "duplicate_pet": "펫 복제",
+        "change_skin": "스킨 변경",
+        "tray_exit": "종료",
+        "program_exit_btn": "프로그램 종료",
+        "exit_confirm_title": "프로그램 종료",
+        "exit_confirm_msg": "정말로 프로그램을 완전히 종료하시겠습니까?",
+        "cancel": "취소",
+        "confirm": "확인",
+        "execute": "실행",
+        "error": "오류",
+        "complete": "완료",
+        "applied": "적용됨",
+        "select_wav": "WAV 파일 선택",
+        "open_skin_zip": "스킨 ZIP 열기",
+        "save_skin_zip": "스킨 ZIP 저장",
+        "zip_filter": "ZIP Files (*.zip)",
+        "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+    },
+    "en": {
+        "app_title": "Settings",
+        "tab_timer": "Work Timer",
+        "tab_pet": "Typing Pet",
+        "tab_sound": "Typing Sound",
+        "tab_general": "General",
+        
+        "subtab_timer_list": "Timers",
+        "subtab_window_groups": "Groups",
+        "add_timer": "+ Add Timer",
+        "default_timer_name": "Task",
+        "group_label": "Group:",
+        "idle_label": "Idle:",
+        "unit_seconds": "s",
+        "reset": "Reset",
+        "pause": "Pause",
+        "resume": "Resume",
+        "delete": "Delete",
+        "del_timer_title": "Delete Timer",
+        "del_timer_msg": "Delete '{name}'?",
+        "reset_confirm_title": "Reset Time",
+        "reset_confirm_msg": "Reset time to 0?",
+        "create_group": "+ Group",
+        "default_group_name": "Default Group",
+        "slot": "Slot",
+        "slot_placeholder": "Enter title or click",
+        "pick_window": "Pick",
+        "waiting_click": "Waiting...",
+        "clear": "Clear",
+        "del_group": "Delete",
+        "del_group_msg": "Delete group '{name}'?",
+        "no_group_available": "No group",
+        "group_exists_warn": "Group name already exists.",
+        "magnetic_snap": "Enable magnetic snap",
+
+        "subtab_pet_list": "Active Pets",
+        "subtab_skin_editor": "Skin Editor",
+        "add_pet": "+ Add Pet",
+        "skin_label": "Skin:",
+        "size_label": "Size:",
+        "current_skin": "Skin",
+        "create_skin": "+ New Skin",
+        "create_skin_prompt": "Enter skin name:",
+        "skin_exists_warn": "Skin name already exists.",
+        "open_skin_folder": "Folder",
+        "squash_depth": "Squash Depth",
+        "idle_image": "Idle",
+        "tap1_image": "Tap 1",
+        "tap2_image": "Tap 2",
+        "browse": "Browse",
+        "key_mapping_section": "Key Mappings",
+        "add_mapping": "+ Add",
+        "del_mapping": "Delete",
+        "col_input": "Key",
+        "col_image": "Image",
+        "col_browse": "Browse",
+        "input_waiting": "Wait",
+        "input_detecting": "Detecting...",
+        "skin_pkg_manage": "Packages",
+        "import_skin": "Import",
+        "export_skin": "Export",
+        "clamp_to_screen": "Clamp to screen boundary",
+        "click_through": "Click-Through",
+        "enable_bounce_animation": "Bounce Animation",
+        "bound_timer_label": "Bound Timer",
+        "unbound": "Unbound",
+        "remove_pet": "Delete",
+
+        "key_sound": "Keyboard Sound",
+        "click_sound": "Mouse Sound",
+        "sound_enable": "Enable Sound",
+        "volume": "Volume",
+        "select_sound": "Select Sound",
+        "upload_sound": "Upload",
+        "upload_err": "Only WAV files under 2.5s allowed.",
+
+        "language": "Language",
+        "tray_mode": "Hide from Taskbar",
+        "open_settings": "Settings",
+        "bind_timer": "Dock",
+        "unbind_timer": "Undock",
+        "duplicate_pet": "Duplicate",
+        "change_skin": "Change Skin",
+        "tray_exit": "Exit",
+        "program_exit_btn": "Exit Program",
+        "exit_confirm_title": "Quit",
+        "exit_confirm_msg": "Are you sure you want to quit?",
+        "cancel": "Cancel",
+        "confirm": "OK",
+        "execute": "Confirm",
+        "error": "Error",
+        "complete": "Complete",
+        "applied": "Applied",
+        "select_wav": "Select WAV",
+        "open_skin_zip": "Open ZIP",
+        "save_skin_zip": "Save ZIP",
+        "zip_filter": "ZIP Files (*.zip)",
+        "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+    },
+    "ja": {
+        "app_title": "設定",
+        "tab_timer": "タイマー",
+        "tab_pet": "ペット",
+        "tab_sound": "サウンド",
+        "tab_general": "一般",
+        "subtab_timer_list": "タイマー一覧",
+        "subtab_window_groups": "グループ",
+        "add_timer": "+ 追加",
+        "default_timer_name": "タスク",
+        "group_label": "グループ:",
+        "idle_label": "アイドル:",
+        "unit_seconds": "秒",
+        "reset": "リセット",
+        "pause": "停止",
+        "resume": "再開",
+        "delete": "削除",
+        "del_timer_title": "削除",
+        "del_timer_msg": "削除しますか？",
+        "reset_confirm_title": "リセット",
+        "reset_confirm_msg": "0にしますか？",
+        "create_group": "+ グループ",
+        "default_group_name": "デフォルト",
+        "slot": "スロット",
+        "slot_placeholder": "タイトル入力",
+        "pick_window": "指定",
+        "waiting_click": "待機中...",
+        "clear": "クリア",
+        "del_group": "削除",
+        "del_group_msg": "削除しますか？",
+        "no_group_available": "なし",
+        "group_exists_warn": "同名が存在します",
+        "magnetic_snap": "磁石吸着",
+        "subtab_pet_list": "ペット一覧",
+        "subtab_skin_editor": "スキン",
+        "add_pet": "+ 追加",
+        "skin_label": "スキン:",
+        "size_label": "サイズ:",
+        "current_skin": "スキン",
+        "create_skin": "+ 作成",
+        "create_skin_prompt": "スキン名:",
+        "skin_exists_warn": "同名が存在します",
+        "open_skin_folder": "フォルダ",
+        "squash_depth": "圧縮度",
+        "idle_image": "待機",
+        "tap1_image": "打鍵1",
+        "tap2_image": "打鍵2",
+        "browse": "参照",
+        "key_mapping_section": "マッピング",
+        "add_mapping": "+ 追加",
+        "del_mapping": "削除",
+        "col_input": "キー",
+        "col_image": "画像",
+        "col_browse": "参照",
+        "input_waiting": "待機",
+        "input_detecting": "入力待ち...",
+        "skin_pkg_manage": "パッケージ",
+        "import_skin": "インポート",
+        "export_skin": "エクスポート",
+        "clamp_to_screen": "画面外制限",
+        "click_through": "クリック透過",
+        "enable_bounce_animation": "バウンス",
+        "bound_timer_label": "結合",
+        "unbound": "未結合",
+        "remove_pet": "削除",
+        "key_sound": "打鍵音",
+        "click_sound": "クリック音",
+        "sound_enable": "有効",
+        "volume": "音量",
+        "select_sound": "選択",
+        "upload_sound": "アップロード",
+        "upload_err": "2.5秒以下のWAVのみ",
+        "language": "言語",
+        "tray_mode": "トレイモード",
+        "open_settings": "設定",
+        "bind_timer": "結合",
+        "unbind_timer": "分離",
+        "duplicate_pet": "複製",
+        "change_skin": "変更",
+        "tray_exit": "終了",
+        "program_exit_btn": "プログラム終了",
+        "exit_confirm_title": "終了",
+        "exit_confirm_msg": "終了しますか？",
+        "cancel": "キャンセル",
+        "confirm": "確認",
+        "execute": "実行",
+        "error": "エラー",
+        "complete": "完了",
+        "applied": "適用",
+        "select_wav": "WAV 選択",
+        "open_skin_zip": "ZIP 開く",
+        "save_skin_zip": "ZIP 保存",
+        "zip_filter": "ZIP Files (*.zip)",
+        "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+    },
+    "zh_CN": {
+        "app_title": "设置",
+        "tab_timer": "计时器",
+        "tab_pet": "宠物",
+        "tab_sound": "音效",
+        "tab_general": "常规",
+        "subtab_timer_list": "计时器列表",
+        "subtab_window_groups": "分组",
+        "add_timer": "+ 添加",
+        "default_timer_name": "任务",
+        "group_label": "分组:",
+        "idle_label": "闲置:",
+        "unit_seconds": "秒",
+        "reset": "重置",
+        "pause": "暂停",
+        "resume": "继续",
+        "delete": "删除",
+        "del_timer_title": "删除",
+        "del_timer_msg": "确定删除吗？",
+        "reset_confirm_title": "重置",
+        "reset_confirm_msg": "重置为0？",
+        "create_group": "+ 分组",
+        "default_group_name": "默认",
+        "slot": "槽位",
+        "slot_placeholder": "输入标题",
+        "pick_window": "指定",
+        "waiting_click": "等待中...",
+        "clear": "清空",
+        "del_group": "删除",
+        "del_group_msg": "确定删除吗？",
+        "no_group_available": "无",
+        "group_exists_warn": "已存在",
+        "magnetic_snap": "磁吸附",
+        "subtab_pet_list": "宠物列表",
+        "subtab_skin_editor": "皮肤",
+        "add_pet": "+ 添加",
+        "skin_label": "皮肤:",
+        "size_label": "大小:",
+        "current_skin": "皮肤",
+        "create_skin": "+ 新建",
+        "create_skin_prompt": "名称:",
+        "skin_exists_warn": "已存在",
+        "open_skin_folder": "文件夹",
+        "squash_depth": "压缩度",
+        "idle_image": "待机",
+        "tap1_image": "打键1",
+        "tap2_image": "打键2",
+        "browse": "浏览",
+        "key_mapping_section": "映射",
+        "add_mapping": "+ 添加",
+        "del_mapping": "删除",
+        "col_input": "键",
+        "col_image": "图",
+        "col_browse": "浏览",
+        "input_waiting": "等待",
+        "input_detecting": "检测中...",
+        "skin_pkg_manage": "包管理",
+        "import_skin": "导入",
+        "export_skin": "导出",
+        "clamp_to_screen": "限制边界",
+        "click_through": "鼠标穿透",
+        "enable_bounce_animation": "弹跳",
+        "bound_timer_label": "绑定",
+        "unbound": "未绑定",
+        "remove_pet": "删除",
+        "key_sound": "按键音",
+        "click_sound": "点击音",
+        "sound_enable": "启用",
+        "volume": "音量",
+        "select_sound": "选择",
+        "upload_sound": "上传",
+        "upload_err": "仅限2.5秒以下WAV",
+        "language": "语言",
+        "tray_mode": "托盘模式",
+        "open_settings": "设置",
+        "bind_timer": "绑定",
+        "unbind_timer": "解绑",
+        "duplicate_pet": "复制",
+        "change_skin": "更换",
+        "tray_exit": "退出",
+        "program_exit_btn": "退出程序",
+        "exit_confirm_title": "退出",
+        "exit_confirm_msg": "确定退出吗？",
+        "cancel": "取消",
+        "confirm": "确定",
+        "execute": "执行",
+        "error": "错误",
+        "complete": "完成",
+        "applied": "已应用",
+        "select_wav": "选择 WAV",
+        "open_skin_zip": "打开 ZIP",
+        "save_skin_zip": "保存 ZIP",
+        "zip_filter": "ZIP Files (*.zip)",
+        "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+    },
+    "zh_TW": {
+        "app_title": "設定",
+        "tab_timer": "計時器",
+        "tab_pet": "寵物",
+        "tab_sound": "音效",
+        "tab_general": "一般",
+        "subtab_timer_list": "計時器列表",
+        "subtab_window_groups": "群組",
+        "add_timer": "+ 新增",
+        "default_timer_name": "任務",
+        "group_label": "群組:",
+        "idle_label": "閒置:",
+        "unit_seconds": "秒",
+        "reset": "重置",
+        "pause": "暫停",
+        "resume": "繼續",
+        "delete": "刪除",
+        "del_timer_title": "刪除",
+        "del_timer_msg": "確定刪除嗎？",
+        "reset_confirm_title": "重置",
+        "reset_confirm_msg": "重置為0？",
+        "create_group": "+ 群組",
+        "default_group_name": "預設",
+        "slot": "槽位",
+        "slot_placeholder": "輸入標題",
+        "pick_window": "指定",
+        "waiting_click": "等待中...",
+        "clear": "清空",
+        "del_group": "刪除",
+        "del_group_msg": "確定刪除嗎？",
+        "no_group_available": "無",
+        "group_exists_warn": "已存在",
+        "magnetic_snap": "磁吸附",
+        "subtab_pet_list": "寵物列表",
+        "subtab_skin_editor": "皮膚",
+        "add_pet": "+ 新增",
+        "skin_label": "皮膚:",
+        "size_label": "大小:",
+        "current_skin": "皮膚",
+        "create_skin": "+ 新建",
+        "create_skin_prompt": "名稱:",
+        "skin_exists_warn": "已存在",
+        "open_skin_folder": "資料夾",
+        "squash_depth": "壓縮度",
+        "idle_image": "待機",
+        "tap1_image": "打鍵1",
+        "tap2_image": "打鍵2",
+        "browse": "瀏覽",
+        "key_mapping_section": "映射",
+        "add_mapping": "+ 新增",
+        "del_mapping": "刪除",
+        "col_input": "鍵",
+        "col_image": "圖",
+        "col_browse": "瀏覽",
+        "input_waiting": "等待",
+        "input_detecting": "檢測中...",
+        "skin_pkg_manage": "套件",
+        "import_skin": "導入",
+        "export_skin": "導出",
+        "clamp_to_screen": "限制邊界",
+        "click_through": "滑鼠穿透",
+        "enable_bounce_animation": "彈跳",
+        "bound_timer_label": "綁定",
+        "unbound": "未綁定",
+        "remove_pet": "刪除",
+        "key_sound": "按鍵音",
+        "click_sound": "點擊音",
+        "sound_enable": "啟用",
+        "volume": "音量",
+        "select_sound": "選擇",
+        "upload_sound": "上傳",
+        "upload_err": "僅限2.5秒以下WAV",
+        "language": "語言",
+        "tray_mode": "托盤模式",
+        "open_settings": "設定",
+        "bind_timer": "綁定",
+        "unbind_timer": "解綁",
+        "duplicate_pet": "複製",
+        "change_skin": "更換",
+        "tray_exit": "退出",
+        "program_exit_btn": "退出程式",
+        "exit_confirm_title": "退出",
+        "exit_confirm_msg": "確定退出嗎？",
+        "cancel": "取消",
+        "confirm": "確定",
+        "execute": "執行",
+        "error": "錯誤",
+        "complete": "完成",
+        "applied": "已應用",
+        "select_wav": "選擇 WAV",
+        "open_skin_zip": "開啟 ZIP",
+        "save_skin_zip": "儲存 ZIP",
+        "zip_filter": "ZIP Files (*.zip)",
+        "image_filter": "Images (*.png *.jpg *.jpeg *.gif *.webp)"
+    }
+}
+
+class I18nManager(QObject):
+    language_changed = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self._current_lang = "ko"
+
+    def detect_os_language(self):
+        sys_lang = QLocale.system().name()
+        if sys_lang.startswith("en"):
+            self.set_language("en")
+        elif sys_lang.startswith("ja"):
+            self.set_language("ja")
+        elif sys_lang == "zh_CN" or sys_lang.startswith("zh_Hans"):
+            self.set_language("zh_CN")
+        elif sys_lang.startswith("zh"):
+            self.set_language("zh_TW")
+        else:
+            self.set_language("ko")
+
+    def set_language(self, lang_code):
+        if lang_code in TRANSLATIONS and self._current_lang != lang_code:
+            self._current_lang = lang_code
+            self.language_changed.emit()
+
+    def get_lang(self):
+        return self._current_lang
+
+    def tr(self, key, default=None):
+        fallback = default if default is not None else key
+        return TRANSLATIONS.get(self._current_lang, TRANSLATIONS["ko"]).get(key, fallback)
+
+I18n = I18nManager()
+
+==================================================
+FILE: core/input_engine.py
+==================================================
+
+# core/input_engine.py
+import sys
+import time
+import threading
+import ctypes
+import subprocess
+from pynput import keyboard, mouse
+from PyQt6.QtCore import QObject, pyqtSignal
+
+class InputEngineBridge(QObject):
+    input_occurred = pyqtSignal(str, bool)
+    mouse_clicked_global = pyqtSignal(str, int, int)  # 버튼명, x, y 좌표 포함
+    escape_pressed_global = pyqtSignal()
+
+input_bridge = InputEngineBridge()
+
+active_modifiers = set()
+last_activity_time = time.time()
+_last_move_throttle_time = 0.0
+
+SHIFT_MAP = {
+    '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+    '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+    '-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+    ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~'
+}
+
+MAC_VK_MAP = {
+    0: 'a', 1: 's', 2: 'd', 3: 'f', 4: 'h', 5: 'g', 6: 'z', 7: 'x',
+    8: 'c', 9: 'v', 11: 'b', 12: 'q', 13: 'w', 14: 'e', 15: 'r',
+    16: 'y', 17: 't', 18: '1', 19: '2', 20: '3', 21: '4', 22: '6',
+    23: '5', 24: '=', 25: '9', 26: '7', 27: '-', 28: '8', 29: '0',
+    30: ']', 31: 'o', 32: 'u', 33: '[', 34: 'i', 35: 'p', 37: 'l',
+    38: 'j', 39: "'", 40: 'k', 41: ';', 42: '\\', 43: ',', 44: '/',
+    45: 'n', 46: 'm', 47: '.', 49: 'space', 50: '`'
+}
+
+def get_last_activity_time() -> float:
+    return last_activity_time
+
+def mark_activity():
+    global last_activity_time
+    last_activity_time = time.time()
+
+def check_mac_accessibility():
+    if sys.platform != 'darwin':
+        return True
+    try:
+        app_services = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        app_services.AXIsProcessTrusted.restype = ctypes.c_bool
+        is_trusted = app_services.AXIsProcessTrusted()
+        if not is_trusted:
+            subprocess.Popen(
+                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                stderr=subprocess.DEVNULL
+            )
+        return bool(is_trusted)
+    except Exception as e:
+        print(f"[InputEngine] Accessibility check failed: {e}")
+        return False
+
+def normalize_key_token(token):
+    if not token:
+        return ""
+    token_str = str(token).strip()
+    if token_str.startswith("<") and token_str.endswith(">"):
+        inner = token_str[1:-1]
+        if inner.isdigit():
+            vk = int(inner)
+            if 48 <= vk <= 57:
+                return chr(vk)
+            elif 65 <= vk <= 90:
+                return chr(vk).lower()
+            elif 96 <= vk <= 105:
+                return str(vk - 96)
+    return token_str.lower()
+
+def _extract_vk_fallback(key) -> str:
+    vk = getattr(key, 'vk', None)
+    if vk is None:
+        return ""
+    if sys.platform == 'darwin':
+        return MAC_VK_MAP.get(vk, "")
+    else:
+        if 48 <= vk <= 57:
+            return chr(vk)
+        elif 65 <= vk <= 90:
+            return chr(vk).lower()
+        elif 96 <= vk <= 105:
+            return str(vk - 96)
+    return ""
+
+def on_key_press(key):
+    try:
+        mark_activity()
+        if key in (keyboard.Key.shift, keyboard.Key.shift_r, keyboard.Key.shift_l):
+            active_modifiers.add("shift")
+            return
+        elif key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+            active_modifiers.add("ctrl")
+            return
+        elif key in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
+            active_modifiers.add("alt")
+            return
+        elif key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):
+            active_modifiers.add("cmd")
+            return
+
+        is_shift = "shift" in active_modifiers
+        is_ctrl = "ctrl" in active_modifiers
+        is_alt = "alt" in active_modifiers
+        is_cmd = "cmd" in active_modifiers
+
+        char_val = getattr(key, 'char', None)
+        base_name = None
+        
+
+        if char_val is not None:
+            raw_char = str(char_val)
+            if len(raw_char) == 1 and ord(raw_char) < 32:
+                base_name = chr(ord(raw_char) + 96).lower()
+            elif len(raw_char) == 1 and ord(raw_char) <= 126:
+                base_name = raw_char.lower()
+            else:
+                base_name = _extract_vk_fallback(key) or raw_char.lower()
+        else:
+            vk_name = _extract_vk_fallback(key)
+            if vk_name:
+                base_name = vk_name
+            else:
+                raw_name = getattr(key, 'name', str(key))
+                clean_name = str(raw_name).replace("Key.", "").replace("key.", "")
+                base_name = normalize_key_token(clean_name)
+
+        resolved_keys = []
+        if char_val and char_val in "!@#$%^&*()_+{}|:\"<>?~":
+            resolved_keys.append(char_val)
+        if is_shift and base_name in SHIFT_MAP:
+            resolved_keys.append(SHIFT_MAP[base_name])
+
+        mods = []
+        if is_cmd: mods.append("cmd")
+        if is_ctrl: mods.append("ctrl")
+        if is_alt: mods.append("alt")
+        if is_shift and not (is_shift and base_name in SHIFT_MAP):
+            mods.append("shift")
+
+        if mods and base_name:
+            resolved_keys.append("+".join(mods) + "+" + base_name)
+        if base_name:
+            resolved_keys.append(base_name)
+
+        if base_name == "esc":
+            input_bridge.escape_pressed_global.emit()
+
+        payload = "|".join(dict.fromkeys(resolved_keys))
+        input_bridge.input_occurred.emit(payload, False)
+    except Exception as e:
+        print(f"[InputEngine] Key error: {e}")
+
+def on_key_release(key):
+    try:
+        if key in (keyboard.Key.shift, keyboard.Key.shift_r, keyboard.Key.shift_l):
+            active_modifiers.discard("shift")
+        elif key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+            active_modifiers.discard("ctrl")
+        elif key in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
+            active_modifiers.discard("alt")
+        elif key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):
+            active_modifiers.discard("cmd")
+    except Exception:
+        pass
+
+def on_mouse_click(x, y, button, pressed):
+    if button == mouse.Button.left:
+        b_name = "mouse_left"
+    elif button == mouse.Button.right:
+        b_name = "mouse_right"
+    elif button == mouse.Button.middle:
+        b_name = "mouse_middle"
+    else:
+        b_name = "mouse_click"
+
+    if pressed:
+        mark_activity()
+        input_bridge.input_occurred.emit(b_name, True)
+    else:
+        input_bridge.mouse_clicked_global.emit(b_name, int(x), int(y))
+
+def on_mouse_move(x, y):
+    global _last_move_throttle_time
+    now = time.time()
+    if now - _last_move_throttle_time > 0.15:
+        _last_move_throttle_time = now
+        mark_activity()
+
+def on_mouse_scroll(x, y, dx, dy):
+    mark_activity()
+
+def start_input_engine():
+    if sys.platform == 'darwin':
+        check_mac_accessibility()
+
+    def listener_thread():
+        if sys.platform == 'darwin':
+            time.sleep(0.3)
+        try:
+            with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as k_listener, \
+                 mouse.Listener(on_click=on_mouse_click, on_move=on_mouse_move, on_scroll=on_mouse_scroll) as m_listener:
+                k_listener.join()
+                m_listener.join()
+        except Exception as e:
+            print(f"[InputEngine] Listener error: {e}")
+
+    t = threading.Thread(target=listener_thread, daemon=True)
+    t.start()
+
+==================================================
+FILE: core/snap_manager.py
+==================================================
+
+# core/snap_manager.py
+from PyQt6.QtCore import QPoint
+from core.config_manager import config_mgr
+
+class SnapManager:
+    @staticmethod
+    def calculate_snap(moving_widget, all_widgets, new_pos: QPoint) -> QPoint:
+        if not config_mgr.config.get("settings", {}).get("magnetic_snap", True):
+            return new_pos
+
+        threshold = config_mgr.config.get("settings", {}).get("snap_distance", 15)
+        target_x = new_pos.x()
+        target_y = new_pos.y()
+        w = moving_widget.width()
+        h = moving_widget.height()
+
+        m_left = target_x
+        m_right = target_x + w
+        m_top = target_y
+        m_bottom = target_y + h
+
+        for other in all_widgets:
+            if other == moving_widget or not other.isVisible():
+                continue
+            o_geo = other.geometry()
+            o_left, o_right, o_top, o_bottom = o_geo.left(), o_geo.right(), o_geo.top(), o_geo.bottom()
+
+            if abs(m_left - o_right) <= threshold: target_x = o_right
+            elif abs(m_right - o_left) <= threshold: target_x = o_left - w
+            elif abs(m_left - o_left) <= threshold: target_x = o_left
+            elif abs(m_right - o_right) <= threshold: target_x = o_right - w
+
+            if abs(m_top - o_bottom) <= threshold: target_y = o_bottom
+            elif abs(m_bottom - o_top) <= threshold: target_y = o_top - h
+            elif abs(m_top - o_top) <= threshold: target_y = o_top
+            elif abs(m_bottom - o_bottom) <= threshold: target_y = o_bottom - h
+
+        return QPoint(target_x, target_y)
+
+==================================================
+FILE: core/sound_manager.py
+==================================================
+
+# core/sound_manager.py
+import os
+import wave
+from PyQt6.QtCore import QUrl
+from PyQt6.QtMultimedia import QSoundEffect
+from core.config_manager import config_mgr, USER_SOUNDS_DIR, BUNDLE_SOUNDS_DIR
+
+SUPPORTED_EXTENSIONS = ('.wav',)
+
+def scan_sound_files():
+    found_sounds = {}
+    if os.path.exists(BUNDLE_SOUNDS_DIR):
+        for root, _, files in os.walk(BUNDLE_SOUNDS_DIR):
+            for f in sorted(files):
+                if f.lower().endswith(SUPPORTED_EXTENSIONS):
+                    base_name = os.path.splitext(f)[0]
+                    full_path = os.path.abspath(os.path.join(root, f))
+                    rel_dir = os.path.relpath(root, BUNDLE_SOUNDS_DIR)
+                    name = f"[{rel_dir}] {base_name}" if rel_dir != "." else base_name
+                    found_sounds[name] = full_path
+    if os.path.exists(USER_SOUNDS_DIR):
+        for root, _, files in os.walk(USER_SOUNDS_DIR):
+            for f in sorted(files):
+                if f.lower().endswith(SUPPORTED_EXTENSIONS):
+                    base_name = os.path.splitext(f)[0]
+                    full_path = os.path.abspath(os.path.join(root, f))
+                    found_sounds[f"[User] {base_name}"] = full_path
+    return found_sounds
+
+class SoundManager:
+    def __init__(self):
+        self.key_pool = []
+        self.click_pool = []
+        self.key_idx = 0
+        self.click_idx = 0
+        self._initialized = False
+
+    def ensure_initialized(self):
+        if self._initialized: return
+        self.key_pool = [QSoundEffect() for _ in range(6)]
+        self.click_pool = [QSoundEffect() for _ in range(4)]
+        self._initialized = True
+        self.load_sounds()
+
+    def get_actual_path(self, prefix):
+        snd_conf = config_mgr.config.get("sound", {})
+        val = snd_conf.get(f"{prefix}_sound_path", "")
+        if not val or val == "none": return ""
+        if os.path.isabs(val) and os.path.exists(val) and val.lower().endswith('.wav'): return val
+        candidate = os.path.join(USER_SOUNDS_DIR, val)
+        if os.path.exists(candidate) and candidate.lower().endswith('.wav'): return os.path.abspath(candidate)
+        candidate_bundle = os.path.join(BUNDLE_SOUNDS_DIR, val)
+        if os.path.exists(candidate_bundle) and candidate_bundle.lower().endswith('.wav'): return os.path.abspath(candidate_bundle)
+        scanned = scan_sound_files()
+        if val in scanned: return scanned[val]
+        return ""
+
+    def load_sounds(self):
+        if not self._initialized: return
+        k_path = self.get_actual_path("key")
+        c_path = self.get_actual_path("click")
+        for player in self.key_pool:
+            player.setSource(QUrl.fromLocalFile(k_path) if k_path and os.path.exists(k_path) else QUrl())
+        for player in self.click_pool:
+            player.setSource(QUrl.fromLocalFile(c_path) if c_path and os.path.exists(c_path) else QUrl())
+        self.update_volumes()
+
+    def update_volumes(self):
+        if not self._initialized: return
+        snd_conf = config_mgr.config.get("sound", {})
+        k_vol = snd_conf.get("key_volume", 50) / 100.0
+        c_vol = snd_conf.get("click_volume", 50) / 100.0
+        for p in self.key_pool: p.setVolume(k_vol)
+        for p in self.click_pool: p.setVolume(c_vol)
+
+    def play_key(self):
+        if not self._initialized or not self.key_pool: return
+        if not config_mgr.config.get("sound", {}).get("key_sound_enabled", True): return
+        self.key_pool[self.key_idx].play()
+        self.key_idx = (self.key_idx + 1) % len(self.key_pool)
+
+    def play_click(self):
+        if not self._initialized or not self.click_pool: return
+        if not config_mgr.config.get("sound", {}).get("click_sound_enabled", True): return
+        self.click_pool[self.click_idx].play()
+        self.click_idx = (self.click_idx + 1) % len(self.click_pool)
+
+    @staticmethod
+    def is_valid_wav(path, max_sec=2.5):
+        if not path.lower().endswith('.wav'): return False
+        try:
+            with wave.open(path, 'r') as f:
+                return (f.getnframes() / float(f.getframerate())) <= max_sec
+        except Exception:
+            return False
+
+sound_mgr = SoundManager()
+
+==================================================
+FILE: core/window_tracker.py
+==================================================
+
+# core/window_tracker.py
+import sys
+import os
+import subprocess
+from typing import Optional
+
+class WindowInfo:
+    def __init__(self, title="", app_name="", window_id=0, pid=0):
+        self.title = title
+        self.app_name = app_name
+        self.window_id = window_id
+        self.pid = pid
+
+    def __bool__(self):
+        return bool(self.title or self.app_name)
+
+    def format_slot_string(self) -> str:
+        clean_app = (self.app_name or "").strip()
+        clean_title = (self.title or "").strip()
+        if clean_app and clean_title:
+            return f"[{clean_app}] {clean_title}"
+        elif clean_app:
+            return f"[{clean_app}]"
+        return clean_title
+
+def get_window_at_point(x: int, y: int) -> WindowInfo:
+    """마우스 커서 좌표 (x, y) 아래에 있는 최상위 윈도우 정보를 반환 (게임/보안창 보완용)"""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            pt = wintypes.POINT(int(x), int(y))
+            hwnd = user32.WindowFromPoint(pt)
+            if not hwnd:
+                return WindowInfo()
+
+            root_hwnd = user32.GetAncestor(hwnd, 2)  # GA_ROOT
+            if root_hwnd:
+                hwnd = root_hwnd
+
+            win_pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+            pid_val = win_pid.value
+
+            length = user32.GetWindowTextLengthW(hwnd)
+            title = ""
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buff, length + 1)
+                title = buff.value.strip()
+
+            app_name = _get_win32_process_name(kernel32, pid_val)
+            return WindowInfo(title=title, app_name=app_name, window_id=hwnd, pid=pid_val)
+        except Exception:
+            return WindowInfo()
+
+    elif sys.platform == 'darwin':
+        try:
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGWindowListOptionOnScreenOnly,
+                kCGWindowListExcludeDesktopElements,
+                kCGNullWindowID,
+            )
+            options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+            win_list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) or []
+            for w in win_list:
+                if int(w.get("kCGWindowLayer", 0)) != 0:
+                    continue
+                bounds = w.get("kCGWindowBounds", {})
+                wx, wy = float(bounds.get("X", 0)), float(bounds.get("Y", 0))
+                ww, wh = float(bounds.get("Width", 0)), float(bounds.get("Height", 0))
+                if wx <= x <= wx + ww and wy <= y <= wy + wh:
+                    pid = int(w.get("kCGWindowOwnerPID", 0))
+                    app_name = str(w.get("kCGWindowOwnerName") or "").strip()
+                    title = str(w.get("kCGWindowName") or "").strip()
+                    w_id = int(w.get("kCGWindowNumber", 0)) or pid
+                    if app_name or title:
+                        return WindowInfo(title=title, app_name=app_name, window_id=w_id, pid=pid)
+        except Exception:
+            pass
+
+    return WindowInfo()
+
+def _get_win32_process_name(kernel32, pid_val: int) -> str:
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_val)
+    if not h_process:
+        return ""
+    try:
+        import ctypes
+        name_buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        if kernel32.QueryFullProcessImageNameW(h_process, 0, name_buf, ctypes.byref(size)):
+            return os.path.basename(name_buf.value)
+    finally:
+        kernel32.CloseHandle(h_process)
+    return ""
+
+def _get_darwin_window_quartz() -> WindowInfo:
+    try:
+        from AppKit import NSWorkspace
+        from Quartz import (
+            CGWindowListCopyWindowInfo,
+            kCGWindowListOptionOnScreenOnly,
+            kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+
+        front_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if not front_app:
+            return WindowInfo()
+
+        pid = int(front_app.processIdentifier())
+        app_name = str(front_app.localizedName() or "")
+
+        options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
+        win_list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) or []
+
+        for w in win_list:
+            if int(w.get("kCGWindowOwnerPID", 0)) != pid:
+                continue
+            if int(w.get("kCGWindowLayer", 0)) != 0:
+                continue
+            w_title = str(w.get("kCGWindowName") or "").strip()
+            w_id = int(w.get("kCGWindowNumber", 0)) or pid
+            return WindowInfo(title=w_title, app_name=app_name, window_id=w_id, pid=pid)
+
+        return WindowInfo(title="", app_name=app_name, window_id=pid, pid=pid)
+    except Exception:
+        return WindowInfo()
+
+def _get_darwin_window_applescript() -> WindowInfo:
+    try:
+        script = '''
+        set frontAppName to ""
+        set wTitle to ""
+        set wId to 0
+        set pId to 0
+        tell application "System Events"
+            try
+                set frontApp to first application process whose frontmost is true
+                set frontAppName to name of frontApp
+                set pId to unix id of frontApp
+                try
+                    tell frontApp
+                        if (count of windows) > 0 then
+                            set wTitle to name of front window
+                            try
+                                set wId to id of front window
+                            on error
+                                set wId to pId
+                            end try
+                        else
+                            set wId to pId
+                        end if
+                    end tell
+                on error
+                    set wId to pId
+                end try
+            end try
+        end tell
+        return frontAppName & "|||" & wTitle & "|||" & (wId as string) & "|||" & (pId as string)
+        '''
+        out = subprocess.check_output(
+            ["osascript", "-e", script],
+            stderr=subprocess.DEVNULL,
+            timeout=0.4
+        )
+        raw = out.decode("utf-8", errors="ignore").strip()
+        parts = raw.split("|||")
+
+        app_name = parts[0].strip() if len(parts) > 0 else ""
+        title = parts[1].strip() if len(parts) > 1 else ""
+        window_id = int(parts[2]) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+        pid = int(parts[3]) if len(parts) > 3 and parts[3].strip().isdigit() else 0
+        if window_id == 0 and pid != 0:
+            window_id = pid
+
+        return WindowInfo(title=title, app_name=app_name, window_id=window_id, pid=pid)
+    except Exception:
+        return WindowInfo()
+
+def get_active_window_info() -> WindowInfo:
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return WindowInfo()
+
+            root_hwnd = user32.GetAncestor(hwnd, 2)
+            if root_hwnd:
+                hwnd = root_hwnd
+
+            win_pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+            pid_val = win_pid.value
+
+            length = user32.GetWindowTextLengthW(hwnd)
+            title = ""
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buff, length + 1)
+                title = buff.value.strip()
+
+            app_name = _get_win32_process_name(kernel32, pid_val)
+
+            if app_name.lower() == "applicationframehost.exe":
+                child_pids = []
+                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                def enum_child_proc(c_hwnd, lparam):
+                    c_pid = ctypes.c_ulong()
+                    user32.GetWindowThreadProcessId(c_hwnd, ctypes.byref(c_pid))
+                    if c_pid.value and c_pid.value != pid_val:
+                        child_pids.append(c_pid.value)
+                        return False
+                    return True
+                user32.EnumChildWindows(hwnd, WNDENUMPROC(enum_child_proc), 0)
+                if child_pids:
+                    real_app = _get_win32_process_name(kernel32, child_pids[0])
+                    if real_app:
+                        app_name = real_app
+                        pid_val = child_pids[0]
+
+            return WindowInfo(title=title, app_name=app_name, window_id=hwnd, pid=pid_val)
+        except Exception:
+            return WindowInfo()
+
+    elif sys.platform == 'darwin':
+        info = _get_darwin_window_quartz()
+        if info and info.title:
+            return info
+        # Quartz에서 창 제목이 비어 있는 경우(화면 기록 권한 미허용 등) AppleScript로 보조 조회
+        as_info = _get_darwin_window_applescript()
+        return as_info if as_info else info
+
+    return WindowInfo()
+
+def is_left_mouse_pressed() -> bool:
+    """전역 훅 없이 현재 마우스 왼쪽 버튼이 물리적으로 눌려 있는지 확인"""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            VK_LBUTTON = 0x01
+            return bool(ctypes.windll.user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+        except Exception:
+            return False
+    elif sys.platform == 'darwin':
+        try:
+            from Quartz import CGEventSourceButtonState, kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft
+            return bool(CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft))
+        except Exception:
+            return False
+    return False
+
+==================================================
+FILE: main.py
+==================================================
+
+# main.py
+import sys
+import os
+import uuid
+import traceback
+
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        myappid = 'morningmeal.compet.desktopapp.3.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PyQt6.QtGui import QIcon, QPixmap, QFontDatabase, QFont
+from PyQt6.QtCore import Qt
+
+from core.config_manager import config_mgr, CRASH_LOG_PATH, BUNDLE_DIR
+from core.i18n import I18n
+from core.input_engine import start_input_engine, input_bridge
+from core.activity_engine import activity_engine
+from core.sound_manager import sound_mgr
+from ui.timer_widget import TimerWidget
+from ui.pet_widget import PetWidget
+from ui.settings.main_window import MainSettingWindow
+from ui.components import StyledMenu
+
+class MorningmealComPetApp:
+    def __init__(self):
+        self.app = QApplication(sys.argv)
+        font_dir = os.path.join(BUNDLE_DIR, "assets", "fonts")
+        if os.path.exists(font_dir):
+            for fname in sorted(os.listdir(font_dir)):
+                if fname.lower().endswith((".ttf", ".otf")):
+                    font_id = QFontDatabase.addApplicationFont(os.path.join(font_dir, fname))
+                    families = QFontDatabase.applicationFontFamilies(font_id)
+                    if families:
+                        font = QFont(families[0], 9)
+                        font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+                        self.app.setFont(font)
+        self.app.setQuitOnLastWindowClosed(False)
+        
+        saved_lang = config_mgr.config.get("settings", {}).get("language", "auto")
+        if saved_lang == "auto":
+            I18n.detect_os_language()
+        else:
+            I18n.set_language(saved_lang)
+
+        sound_mgr.ensure_initialized()
+
+        self.app_icon = self.load_custom_icon()
+        if not self.app_icon.isNull():
+            self.app.setWindowIcon(self.app_icon)
+            if sys.platform == 'darwin':
+                try:
+                    self.app.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, False)
+                except Exception:
+                    pass
+
+        self.timer_widgets = []
+        self.pet_widgets = []
+
+        self.settings_window = MainSettingWindow()
+        self.settings_window.setWindowIcon(self.app_icon)
+        self.settings_window.settings_updated.connect(self.sync_widgets_from_config)
+        self.settings_window.timer_name_updated.connect(self.on_timer_name_realtime_updated)
+        self.settings_window.quit_requested.connect(self.quit_app)
+
+        self.tray_icon = None
+        self.open_act = None
+        self.exit_act = None
+        self.setup_tray()
+        I18n.language_changed.connect(self.retranslate_tray)
+
+        self.sync_widgets_from_config()
+        self.connect_signals()
+        start_input_engine()
+        activity_engine.start()
+
+    def load_custom_icon(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(BUNDLE_DIR, "assets", "app_icon.ico"),
+            os.path.join(base_dir, "assets", "app_icon.ico"),
+            os.path.join(BUNDLE_DIR, "assets", "app_icon.icns"),
+            os.path.join(base_dir, "assets", "app_icon.icns"),
+            os.path.join(BUNDLE_DIR, "assets", "app_icon.png"),
+            os.path.join(base_dir, "assets", "app_icon.png")
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                icon = QIcon(path)
+                if not icon.isNull():
+                    return icon
+        pix = QPixmap(16, 16)
+        pix.fill(Qt.GlobalColor.transparent)
+        return QIcon(pix)
+
+    def setup_tray(self):
+            self.tray_icon = QSystemTrayIcon(self.app_icon, self.app)
+            self.tray_icon.setToolTip("morningmeal_ComPet")
+
+            self.tray_menu = StyledMenu()
+            self.open_act = self.tray_menu.addAction(I18n.tr("open_settings"))
+            self.open_act.triggered.connect(self.show_settings)
+            self.tray_menu.addSeparator()
+            self.exit_act = self.tray_menu.addAction(I18n.tr("tray_exit"))
+            self.exit_act.triggered.connect(self.quit_app)
+
+            self.tray_icon.setContextMenu(self.tray_menu)
+            self.tray_icon.activated.connect(self.on_tray_activated)
+            self.tray_icon.show()
+
+    def retranslate_tray(self):
+        if self.open_act: self.open_act.setText(I18n.tr("open_settings"))
+        if self.exit_act: self.exit_act.setText(I18n.tr("tray_exit"))
+
+    def on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.DoubleClick, QSystemTrayIcon.ActivationReason.Trigger):
+            self.show_settings()
+
+    def show_settings(self):
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
+
+    def connect_signals(self):
+        input_bridge.input_occurred.connect(self.on_input_event)
+        activity_engine.tick.connect(self.on_timers_tick)
+
+    def on_input_event(self, payload, is_mouse_click):
+        if is_mouse_click: sound_mgr.play_click()
+        else: sound_mgr.play_key()
+        for pet in self.pet_widgets:
+            pet.trigger_bounce(payload)
+
+    def on_timers_tick(self, updated_dict):
+        for tw in self.timer_widgets:
+            t_id = tw.timer_data.get("id")
+            if t_id in updated_dict:
+                tw.update_time(updated_dict[t_id])
+
+    def on_timer_name_realtime_updated(self, timer_id: str, new_name: str):
+        for tw in self.timer_widgets:
+            if tw.timer_data.get("id") == timer_id:
+                tw.timer_data["name"] = new_name
+                tw.update_metadata()
+                break
+
+    def get_all_timer_widgets(self):
+        return self.timer_widgets
+
+    def get_bound_pet_for_timer(self, timer_id):
+        for pet_w in self.pet_widgets:
+            if pet_w.pet_data.get("bound_timer_id") == timer_id:
+                return pet_w
+        return None
+
+    def _apply_macos_tray_policy(self):
+        if sys.platform != "darwin":
+            return
+        try:
+            from AppKit import (
+                NSApplication,
+                NSApplicationActivationPolicyRegular,
+                NSApplicationActivationPolicyAccessory,
+            )
+            is_tray = config_mgr.config.get("settings", {}).get("tray_mode", False)
+            policy = NSApplicationActivationPolicyAccessory if is_tray else NSApplicationActivationPolicyRegular
+            NSApplication.sharedApplication().setActivationPolicy_(policy)
+        except Exception:
+            pass
+
+    def sync_widgets_from_config(self):
+        self._apply_macos_tray_policy()
+        if hasattr(self, "tray_menu") and self.tray_menu:
+            self.tray_menu.apply_theme()
+        current_timer_data = config_mgr.config.get("timers", [])
+        alive_t_ids = {t["id"] for t in current_timer_data}
+
+        to_remove_t = [tw for tw in self.timer_widgets if tw.timer_data.get("id") not in alive_t_ids]
+        for tw in to_remove_t:
+            tw.close()
+            self.timer_widgets.remove(tw)
+
+        existing_t_ids = {tw.timer_data.get("id") for tw in self.timer_widgets}
+        for t_data in current_timer_data:
+            if t_data["id"] not in existing_t_ids:
+                tw = TimerWidget(
+                    timer_data=t_data,
+                    get_all_timers_callback=self.get_all_timer_widgets,
+                    get_bound_pet_callback=self.get_bound_pet_for_timer,
+                    open_main_settings_callback=self.show_settings,
+                    remove_callback=self.remove_timer_by_id,
+                    quit_callback=self.quit_app
+                )
+                tw.show()
+                self.timer_widgets.append(tw)
+            else:
+                for tw in self.timer_widgets:
+                    if tw.timer_data.get("id") == t_data["id"]:
+                        tw.timer_data = t_data
+                        tw.update_window_flags()
+                        tw.update_metadata()
+
+        current_pet_data = config_mgr.config.get("pets", [])
+        alive_p_ids = {p["id"] for p in current_pet_data}
+
+        to_remove_p = [pw for pw in self.pet_widgets if pw.pet_data.get("id") not in alive_p_ids]
+        for pw in to_remove_p:
+            pw.close()
+            self.pet_widgets.remove(pw)
+
+        existing_p_ids = {pw.pet_data.get("id") for pw in self.pet_widgets}
+        for p_data in current_pet_data:
+            if p_data["id"] not in existing_p_ids:
+                pw = PetWidget(
+                    pet_data=p_data,
+                    get_all_timers_callback=self.get_all_timer_widgets,
+                    open_settings_callback=self.show_settings,
+                    duplicate_callback=self.duplicate_pet,
+                    remove_callback=self.remove_pet_by_id,
+                    quit_callback=self.quit_app
+                )
+                pw.dock_changed.connect(self.on_pet_dock_changed)
+                pw.skin_changed.connect(lambda pid, sname: self.settings_window.tab_pet.sync_pet_cards_state())
+                pw.scale_changed.connect(lambda pid, sc: self.settings_window.tab_pet.sync_pet_cards_state())
+                pw.show()
+                self.pet_widgets.append(pw)
+            else:
+                for pw in self.pet_widgets:
+                    if pw.pet_data.get("id") == p_data["id"]:
+                        pw.pet_data = p_data
+                        pw.update_window_flags()
+                        pw.load_resources()
+                        pw.initial_dock_check()
+
+    def on_pet_dock_changed(self):
+        config_mgr.save_config()
+        self.settings_window.tab_pet.sync_pet_cards_state()
+
+    def duplicate_pet(self, source_data):
+        new_pet = dict(source_data)
+        new_pet["id"] = str(uuid.uuid4())
+        new_pet["x"] = int(source_data.get("x", 200)) + 30
+        new_pet["y"] = int(source_data.get("y", 200)) + 30
+        new_pet["bound_timer_id"] = ""
+        config_mgr.config.setdefault("pets", []).append(new_pet)
+        config_mgr.save_config()
+        self.sync_widgets_from_config()
+        self.settings_window.tab_pet.refresh_pet_list()
+
+    def remove_pet_by_id(self, pet_id):
+        pets = config_mgr.config.get("pets", [])
+        target = next((p for p in pets if p.get("id") == pet_id), None)
+        if target:
+            pets.remove(target)
+            config_mgr.save_config()
+            self.sync_widgets_from_config()
+            self.settings_window.tab_pet.refresh_pet_list()
+
+    def remove_timer_by_id(self, timer_id):
+        timers = config_mgr.config.get("timers", [])
+        target = next((t for t in timers if t.get("id") == timer_id), None)
+        if target:
+            for p in config_mgr.config.get("pets", []):
+                if p.get("bound_timer_id") == timer_id:
+                    p["bound_timer_id"] = ""
+            timers.remove(target)
+            config_mgr.save_config()
+            self.sync_widgets_from_config()
+            self.settings_window.tab_timer.refresh_timer_list()
+            self.settings_window.tab_pet.sync_pet_cards_state()
+
+    def quit_app(self):
+        activity_engine.running = False
+        config_mgr.save_config()
+        self.app.quit()
+
+    def run(self):
+        return self.app.exec()
+
+def main():
+    try:
+        app_runner = MorningmealComPetApp()
+        sys.exit(app_runner.run())
+    except Exception:
+        os.makedirs(os.path.dirname(CRASH_LOG_PATH), exist_ok=True)
+        with open(CRASH_LOG_PATH, "w", encoding="utf-8") as f:
+            f.write(traceback.format_exc())
+        print(f"[FATAL ERROR] Check crash log at: {CRASH_LOG_PATH}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+==================================================
+FILE: text.py
+==================================================
+
+import pathlib
+
+# 읽어올 텍스트/코드 파일 확장자
+exts = {'.py', '.json'}
+# 제외할 폴더 (캐시 및 에셋 제외)
+exclude = {'__pycache__', '.git', '.venv', 'assets'}
+
+with open('project_code.txt', 'w', encoding='utf-8') as out:
+    for p in sorted(pathlib.Path('.').rglob('*')):
+        if p.is_file() and p.suffix in exts and not any(part in exclude for part in p.parts):
+            out.write(f"\n{'='*50}\nFILE: {p.as_posix()}\n{'='*50}\n\n")
+            out.write(p.read_text(encoding='utf-8', errors='ignore'))
+            out.write("\n")
+
+print("project_code.txt 생성이 완료되었습니다!")
+
+==================================================
+FILE: ui/__init__.py
+==================================================
+
+
+
+==================================================
+FILE: ui/components.py
+==================================================
+
+import os
+import sys
+from PyQt6.QtWidgets import (
+    QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
+    QFrame, QDialog, QMenu
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PyQt6.QtGui import QMouseEvent, QKeyEvent, QFocusEvent, QCursor
+from core.config_manager import config_mgr
+from core.window_tracker import get_active_window_info, get_window_at_point, is_left_mouse_pressed
+from core.i18n import I18n
+from ui.theme import get_popup_menu_style
+
+
+def format_time(seconds):
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+class WindowClickCaptureBridge(QObject):
+    window_captured = pyqtSignal(str, bool)
+
+
+capture_bridge = WindowClickCaptureBridge()
+_capture_poll_timer: QTimer | None = None
+_capture_elapsed_ms = 0
+_was_mouse_down = False
+_initial_window_id = 0
+
+
+def _finish_capture(slot_str: str, is_cancelled: bool):
+    global _capture_poll_timer, _capture_elapsed_ms, _was_mouse_down
+    if _capture_poll_timer is None:
+        return
+
+    _capture_poll_timer.stop()
+    _capture_poll_timer.deleteLater()
+    _capture_poll_timer = None
+    _capture_elapsed_ms = 0
+    _was_mouse_down = False
+
+    capture_bridge.window_captured.emit(slot_str, is_cancelled)
+
+
+def _is_valid_target_window(win, my_pid: int) -> bool:
+    if not win or win.pid == my_pid:
+        return False
+    title_l = (win.title or "").lower()
+    app_l = (win.app_name or "").lower()
+    if "morningmeal" in title_l or "morningmeal" in app_l:
+        return False
+    if app_l == "explorer.exe" and title_l in ("", "program manager"):
+        return False
+    return bool(win.format_slot_string())
+
+
+def _poll_window_capture():
+    global _capture_elapsed_ms, _was_mouse_down
+    _capture_elapsed_ms += 50
+
+    if _capture_elapsed_ms >= 15000:
+        _finish_capture("", True)
+        return
+
+    my_pid = os.getpid()
+
+    # 1) 포그라운드 창이 다른 프로그램(VS Code, 게임 등)으로 바뀐 경우 즉시 감지
+    fg_win = get_active_window_info()
+    if _is_valid_target_window(fg_win, my_pid) and fg_win.window_id != _initial_window_id:
+        _finish_capture(fg_win.format_slot_string(), False)
+        return
+
+    # 2) 마우스 왼쪽 버튼이 눌렸다 떼어지는 순간 커서 아래 창 직접 조회
+    is_down = is_left_mouse_pressed()
+    if is_down:
+        _was_mouse_down = True
+    elif _was_mouse_down and not is_down:
+        _was_mouse_down = False
+        fg_win = get_active_window_info()
+        if _is_valid_target_window(fg_win, my_pid):
+            _finish_capture(fg_win.format_slot_string(), False)
+            return
+
+        pos = QCursor.pos()
+        pt_win = get_window_at_point(pos.x(), pos.y())
+        if _is_valid_target_window(pt_win, my_pid):
+            _finish_capture(pt_win.format_slot_string(), False)
+            return
+
+
+def start_window_click_capture():
+    global _capture_poll_timer, _capture_elapsed_ms, _was_mouse_down, _initial_window_id
+    cancel_window_click_capture()
+
+    init_win = get_active_window_info()
+    _initial_window_id = init_win.window_id if init_win else 0
+    _capture_elapsed_ms = 0
+    _was_mouse_down = False
+
+    _capture_poll_timer = QTimer()
+    _capture_poll_timer.setInterval(50)
+    _capture_poll_timer.timeout.connect(_poll_window_capture)
+    _capture_poll_timer.start()
+
+
+def cancel_window_click_capture():
+    _finish_capture("", True)
+
+class CustomTitleBar(QWidget):
+    theme_toggled = pyqtSignal()
+    language_switched = pyqtSignal(str)
+
+    def __init__(self, parent_window, title_key="app_title"):
+        super().__init__(parent_window)
+        self.parent_window = parent_window
+        self.title_key = title_key
+        self.setObjectName("titleBar")
+        self.setFixedHeight(44)
+        self.drag_start_pos = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 0, 10, 0)
+        layout.setSpacing(12)
+
+        self.title_label = QLabel(I18n.tr(self.title_key))
+        self.title_label.setObjectName("titleLabel")
+        layout.addWidget(self.title_label)
+        layout.addStretch()
+
+        # 우측 상단 언어 선택 버튼
+        self.lang_btn = QPushButton("Ko")
+        self.lang_btn.setObjectName("titleBtn")
+        self.lang_btn.setFixedSize(32, 24)
+        self.lang_btn.clicked.connect(self.show_language_menu)
+        layout.addWidget(self.lang_btn)
+
+        # 우측 상단 다크/라이트 토글 버튼
+        is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+        self.theme_btn = QPushButton("light" if is_dark else "dark")
+        self.theme_btn.setObjectName("titleBtn")
+        self.theme_btn.setFixedSize(42, 24)
+        self.theme_btn.clicked.connect(self.theme_toggled.emit)
+        layout.addWidget(self.theme_btn)
+
+        # 최소화 버튼 (macOS 프레임리스 창은 hide로 안전하게 숨김)
+        self.min_btn = QPushButton("—")
+        self.min_btn.setObjectName("titleBtn")
+        self.min_btn.setFixedSize(24, 24)
+        self.min_btn.clicked.connect(self._on_minimize_clicked)
+        layout.addWidget(self.min_btn)
+
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setObjectName("titleCloseBtn")
+        self.close_btn.setFixedSize(24, 24)
+        self.close_btn.clicked.connect(self.parent_window.hide)
+        layout.addWidget(self.close_btn)
+
+        self.retranslate_ui()
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def _on_minimize_clicked(self):
+        if sys.platform == "darwin":
+            self.parent_window.hide()
+        else:
+            self.parent_window.showMinimized()
+
+    def show_language_menu(self):
+        menu = StyledMenu(self)
+        cur_lang = I18n.get_lang()
+        langs = [
+            ("한국어 (KO)", "ko"),
+            ("English (EN)", "en"),
+            ("日本語 (JA)", "ja"),
+            ("简体中文", "zh_CN"),
+            ("繁體中文", "zh_TW"),
+        ]
+        for name, code in langs:
+            act = menu.addAction(name)
+            act.setCheckable(True)
+            if code == cur_lang:
+                act.setChecked(True)
+            act.triggered.connect(lambda checked, c=code: self._on_lang_selected(c))
+        menu.exec(self.lang_btn.mapToGlobal(self.lang_btn.rect().bottomLeft()))
+
+    def _on_lang_selected(self, lang_code: str):
+        config_mgr.config.setdefault("settings", {})["language"] = lang_code
+        config_mgr.save_config()
+        I18n.set_language(lang_code)
+
+    def retranslate_ui(self):
+        self.title_label.setText(I18n.tr(self.title_key))
+        cur = I18n.get_lang()
+        mapping = {"ko": "Ko", "en": "En", "ja": "Ja", "zh_CN": "CN", "zh_TW": "TW"}
+        self.lang_btn.setText(mapping.get(cur, "Ko"))
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_start_pos = event.globalPosition().toPoint() - self.parent_window.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.drag_start_pos and event.buttons() == Qt.MouseButton.LeftButton:
+            self.parent_window.move(event.globalPosition().toPoint() - self.drag_start_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self.drag_start_pos = None
+        event.accept()
+
+class ConfirmDialog(QDialog):
+    def __init__(self, title_text, msg_text, is_danger=False, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Dialog
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedWidth(320)
+        is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+
+        if is_dark:
+            bg, border = "#18181B", "#3B82F6"
+            title_color, desc_color = "#FAFAFA", "#A1A1AA"
+            cancel_color, cancel_hover = "#A1A1AA", "#60A5FA"
+            ok_color = "#F87171" if is_danger else "#60A5FA"
+            ok_hover = "#EF4444" if is_danger else "#93C5FD"
+        else:
+            bg, border = "#FFFFFF", "#0F4C81"
+            title_color, desc_color = "#111827", "#4B5563"
+            cancel_color, cancel_hover = "#6B7280", "#0F4C81"
+            ok_color = "#E5989B" if is_danger else "#0F4C81"
+            ok_hover = "#EF4444" if is_danger else "#2563EB"
+
+        self.setStyleSheet(f"""
+            QFrame#dialogCard {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton {{
+                background: transparent;
+                border: none;
+                padding: 4px 8px;
+                font-size: 13px;
+                font-weight: 600;
+                color: {cancel_color};
+            }}
+            QPushButton:hover {{
+                color: {cancel_hover};
+            }}
+            QPushButton#okBtn {{
+                color: {ok_color};
+            }}
+            QPushButton#okBtn:hover {{
+                color: {ok_hover};
+            }}
+        """)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        card = QFrame()
+        card.setObjectName("dialogCard")
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 18, 18, 16)
+        layout.setSpacing(10)
+
+        lbl_title = QLabel(title_text)
+        lbl_title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {title_color};")
+        layout.addWidget(lbl_title)
+
+        lbl_msg = QLabel(msg_text)
+        lbl_msg.setWordWrap(True)
+        lbl_msg.setStyleSheet(f"font-size: 12px; color: {desc_color}; line-height: 1.4;")
+        layout.addWidget(lbl_msg)
+
+        btn_box = QHBoxLayout()
+        btn_box.setSpacing(12)
+        btn_box.addStretch()
+
+        btn_cancel = QPushButton(I18n.tr("cancel"))
+        btn_cancel.clicked.connect(self.reject)
+        btn_box.addWidget(btn_cancel)
+
+        btn_ok = QPushButton(I18n.tr("execute") if is_danger else I18n.tr("confirm"))
+        btn_ok.setObjectName("okBtn")
+        btn_ok.clicked.connect(self.accept)
+        btn_box.addWidget(btn_ok)
+
+        layout.addLayout(btn_box)
+        outer.addWidget(card)
+
+
+class AlertDialog(QDialog):
+    def __init__(self, title_text, msg_text, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Dialog
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedWidth(320)
+
+        is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+        if is_dark:
+            bg, border = "#18181B", "#3B82F6"
+            title_color, desc_color = "#FAFAFA", "#A1A1AA"
+            ok_color, ok_hover = "#60A5FA", "#93C5FD"
+        else:
+            bg, border = "#FFFFFF", "#0F4C81"
+            title_color, desc_color = "#111827", "#4B5563"
+            ok_color, ok_hover = "#0F4C81", "#2563EB"
+
+        self.setStyleSheet(f"""
+            QFrame#alertDialogCard {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton#okBtn {{
+                background: transparent;
+                border: none;
+                padding: 4px 8px;
+                font-size: 13px;
+                font-weight: 600;
+                color: {ok_color};
+            }}
+            QPushButton#okBtn:hover {{
+                color: {ok_hover};
+            }}
+        """)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        card = QFrame()
+        card.setObjectName("alertDialogCard")
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 18, 18, 16)
+        layout.setSpacing(10)
+
+        lbl_title = QLabel(title_text)
+        lbl_title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {title_color};")
+        layout.addWidget(lbl_title)
+
+        lbl_msg = QLabel(msg_text)
+        lbl_msg.setWordWrap(True)
+        lbl_msg.setStyleSheet(f"font-size: 12px; color: {desc_color}; line-height: 1.4;")
+        layout.addWidget(lbl_msg)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        btn_ok = QPushButton(I18n.tr("confirm"))
+        btn_ok.setObjectName("okBtn")
+        btn_ok.clicked.connect(self.accept)
+        btn_box.addWidget(btn_ok)
+
+        layout.addLayout(btn_box)
+        outer.addWidget(card)
+
+class KeyCaptureButton(QPushButton):
+    keyCaptured = pyqtSignal(str)
+
+    def __init__(self, text="", parent=None):
+        waiting_text = I18n.tr("input_waiting")
+        self.raw_key = text if (text and text != waiting_text) else ""
+        super().__init__(self.raw_key or waiting_text, parent)
+        self.capturing = False
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def retranslate_ui(self):
+        if not self.raw_key:
+            self.setText(I18n.tr("input_detecting") if self.capturing else I18n.tr("input_waiting"))
+
+    def _stop_capture_ui(self):
+        self.capturing = False
+        self.setProperty("activeCapture", False)
+        self.setText(self.raw_key if self.raw_key else I18n.tr("input_waiting"))
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def focusOutEvent(self, event: QFocusEvent):
+        if self.capturing:
+            self._stop_capture_ui()
+        super().focusOutEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if not self.capturing:
+            self.capturing = True
+            self.setText(I18n.tr("input_detecting"))
+            self.setProperty("activeCapture", True)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.setFocus()
+            event.accept()
+            return
+
+        btn = event.button()
+        k_name = "mouse_left" if btn == Qt.MouseButton.LeftButton else ("mouse_right" if btn == Qt.MouseButton.RightButton else "mouse_middle")
+        self.raw_key = k_name
+        self._stop_capture_ui()
+        self.keyCaptured.emit(k_name)
+        event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        if not self.capturing:
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        modifiers = event.modifiers()
+        if key in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            event.accept()
+            return
+
+        text = event.text().strip()
+        is_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        is_ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+
+        key_names = {
+            Qt.Key.Key_Space: "space", Qt.Key.Key_Return: "enter", Qt.Key.Key_Enter: "enter",
+            Qt.Key.Key_Tab: "tab", Qt.Key.Key_Backspace: "backspace", Qt.Key.Key_Escape: "esc",
+            Qt.Key.Key_Left: "left", Qt.Key.Key_Right: "right", Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down"
+        }
+        base = key_names.get(key, text.lower() if text else f"key_{key}")
+
+        mod_parts = []
+        if modifiers & Qt.KeyboardModifier.MetaModifier:
+            mod_parts.append("cmd" if sys.platform == "darwin" else "win")
+        if is_ctrl: mod_parts.append("ctrl")
+        if is_alt: mod_parts.append("alt")
+        if is_shift: mod_parts.append("shift")
+
+        final_key = "+".join(mod_parts) + "+" + base if mod_parts else base
+        self.raw_key = final_key
+        self._stop_capture_ui()
+        self.keyCaptured.emit(final_key)
+        event.accept()
+
+class StyledMenu(QMenu):
+    """앱 전체(언어 선택, 위젯 우클릭, 트레이)에서 공통으로 사용하는 팝업 메뉴"""
+    def __init__(self, title="", parent=None):
+        if isinstance(title, QWidget) and parent is None:
+            super().__init__(title)
+        else:
+            super().__init__(title, parent)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.apply_theme()
+
+    def apply_theme(self):
+        is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+        self.setStyleSheet(get_popup_menu_style(is_dark))
+
+    def addStyledMenu(self, title: str):
+        sub = StyledMenu(title, self)
+        self.addMenu(sub)
+        return sub
+
+==================================================
+FILE: ui/pet_widget.py
+==================================================
+
+# ui/pet_widget.py
+import sys
+import time
+import os
+from collections import deque
+from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QApplication, QMenu
+from PyQt6.QtGui import QPainter, QPixmap, QWheelEvent, QContextMenuEvent, QMouseEvent
+from core.config_manager import config_mgr, SKINS_DIR
+from core.i18n import I18n
+from core.activity_engine import activity_engine
+from ui.components import StyledMenu
+
+class PetWidget(QWidget):
+    dock_changed = pyqtSignal()
+    scale_changed = pyqtSignal(str, float)
+    skin_changed = pyqtSignal(str, str)
+    moved_with_timer = pyqtSignal(str, int, int)
+
+    def __init__(self, pet_data, get_all_timers_callback, open_settings_callback, duplicate_callback, remove_callback, quit_callback=None):
+        super().__init__()
+        self.pet_data = pet_data
+        self.get_all_timers_callback = get_all_timers_callback
+        self.open_settings_callback = open_settings_callback
+        self.duplicate_callback = duplicate_callback
+        self.remove_callback = remove_callback
+        self.quit_callback = quit_callback
+
+        self.tap_index = 0
+        self.scale_x, self.scale_y = 1.0, 1.0
+        self.squash_depth = 0.20
+        self.skin_enable_bounce = True
+        self.stiffness = 0.25
+        self.hit_times = deque(maxlen=20)
+        self.drag_position = QPoint()
+        self._applied_flags = None
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if sys.platform == 'darwin':
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+
+        self.update_window_flags()
+
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self.update_animation)
+        self.reset_timer = QTimer(self)
+        self.reset_timer.setSingleShot(True)
+        self.reset_timer.timeout.connect(self.reset_to_idle)
+
+        self.load_resources()
+        self.move(int(self.pet_data.get("x", 200)), int(self.pet_data.get("y", 200)))
+        QTimer.singleShot(100, self.initial_dock_check)
+
+    def initial_dock_check(self):
+        t_id = self.pet_data.get("bound_timer_id")
+        if t_id:
+            for timer_w in self.get_all_timers_callback():
+                if timer_w.timer_data.get("id") == t_id:
+                    self.snap_to_timer(timer_w)
+                    self.save_position()
+                    break
+
+    def update_window_flags(self):
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        if config_mgr.config.get("settings", {}).get("tray_mode", False):
+            if sys.platform == 'win32': flags |= Qt.WindowType.Tool
+            else: flags |= Qt.WindowType.NoDropShadowWindowHint
+        if config_mgr.config.get("settings", {}).get("click_through", False):
+            flags |= Qt.WindowType.WindowTransparentForInput
+
+        if self._applied_flags != flags:
+            self._applied_flags = flags
+            self.setWindowFlags(flags)
+            self.show()
+
+    def load_resources(self):
+        skin = self.pet_data.get("skin", "default")
+        self.display_scale = float(self.pet_data.get("scale", 1.0))
+        skin_conf = config_mgr.get_skin_config(skin)
+        self.squash_depth = float(skin_conf.get("squash_depth", 0.20))
+        self.skin_enable_bounce = bool(skin_conf.get("enable_bounce", True))
+        self.key_mappings = skin_conf.get("key_mappings", {})
+
+        s_dir = os.path.join(SKINS_DIR, skin)
+        self.idle_pixmap = QPixmap(os.path.join(s_dir, skin_conf.get("idle_image", "idle.png")))
+        self.tap_pixmaps = [QPixmap(os.path.join(s_dir, p)) for p in skin_conf.get("tap_images", ["tap_left.png", "tap_right.png"])]
+
+        self.cached_pixmaps = {}
+        for k, v in self.key_mappings.items():
+            img_path = os.path.join(s_dir, v)
+            if os.path.exists(img_path):
+                self.cached_pixmaps[str(k).strip().lower()] = QPixmap(img_path)
+
+        self.current_pixmap = self.idle_pixmap
+        self.update_widget_size()
+        self.update()
+
+    def update_widget_size(self):
+        if not self.idle_pixmap.isNull():
+            self.resize(max(30, int(self.idle_pixmap.width() * self.display_scale)), max(30, int(self.idle_pixmap.height() * self.display_scale)))
+
+    def trigger_bounce(self, key_payload):
+        bound_id = self.pet_data.get("bound_timer_id", "")
+        if bound_id and hasattr(activity_engine, "is_timer_active") and not activity_engine.is_timer_active(bound_id):
+            return
+
+        now = time.time()
+        self.hit_times.append(now)
+        apm = ((len(self.hit_times) / (now - self.hit_times[0])) * 60) if len(self.hit_times) > 1 and (now - self.hit_times[0]) > 0 else 0
+
+        candidates = [c.strip().lower() for c in key_payload.split("|") if c.strip()]
+        matched_pixmap = next((self.cached_pixmaps[c] for c in candidates if c in self.cached_pixmaps and not self.cached_pixmaps[c].isNull()), None)
+
+        if matched_pixmap: self.current_pixmap = matched_pixmap
+        elif any(c.startswith("mouse_") for c in candidates) and "mouse_click" in self.cached_pixmaps:
+            self.current_pixmap = self.cached_pixmaps["mouse_click"]
+        else:
+            valid_taps = [p for p in self.tap_pixmaps if not p.isNull()]
+            if valid_taps:
+                self.current_pixmap = valid_taps[self.tap_index % len(valid_taps)]
+                self.tap_index = (self.tap_index + 1) % len(valid_taps)
+
+        if self.skin_enable_bounce:
+            extra = min(apm / 600.0, 1.0) * 0.08
+            depth = min(self.squash_depth + extra, 0.75)
+            self.scale_y = max(0.20, 1.0 - depth)
+            self.scale_x = 1.0 + (depth * 0.5)
+            self.anim_timer.start(16)
+        else:
+            self.scale_x, self.scale_y = 1.0, 1.0
+            if self.anim_timer.isActive(): self.anim_timer.stop()
+
+        self.reset_timer.start(240 if matched_pixmap else 160)
+        self.update()
+
+    def update_animation(self):
+        if abs(self.scale_x - 1.0) < 0.005 and abs(self.scale_y - 1.0) < 0.005:
+            self.scale_x, self.scale_y = 1.0, 1.0
+            self.anim_timer.stop()
+        else:
+            self.scale_x += (1.0 - self.scale_x) * self.stiffness
+            self.scale_y += (1.0 - self.scale_y) * self.stiffness
+        self.update()
+
+    def reset_to_idle(self):
+        self.current_pixmap = self.idle_pixmap
+        self.scale_x, self.scale_y = 1.0, 1.0
+        self.update()
+
+    def paintEvent(self, event):
+        if self.current_pixmap.isNull(): return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.translate(self.width() / 2, self.height())
+        painter.scale(self.display_scale * self.scale_x, self.display_scale * self.scale_y)
+        painter.translate(-self.current_pixmap.width() / 2, -self.current_pixmap.height())
+        painter.drawPixmap(0, 0, self.current_pixmap)
+
+    def wheelEvent(self, event: QWheelEvent):
+        if QApplication.keyboardModifiers() == Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            step = 0.05
+            new_scale = round(min(1.50, max(0.10, self.display_scale + (step if delta > 0 else -step))), 2)
+            if new_scale != self.display_scale:
+                self.display_scale = new_scale
+                self.pet_data["scale"] = new_scale
+                self.update_widget_size()
+                self.initial_dock_check()
+                config_mgr.save_config()
+                self.update()
+                self.scale_changed.emit(self.pet_data.get("id"), self.display_scale)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def snap_to_timer(self, timer_widget):
+        m = getattr(timer_widget, "SHADOW_MARGIN", 0)
+        t_x, t_y, t_w = timer_widget.x(), timer_widget.y(), timer_widget.width()
+        self.move(int(t_x + (t_w - self.width()) / 2), int(t_y + m - self.height() + 4))
+
+    def bind_to_timer(self, timer_id):
+        for p in config_mgr.config.get("pets", []):
+            if p.get("bound_timer_id") == timer_id and p.get("id") != self.pet_data.get("id"):
+                p["bound_timer_id"] = ""
+        self.pet_data["bound_timer_id"] = timer_id
+        for tw in self.get_all_timers_callback():
+            if tw.timer_data.get("id") == timer_id:
+                self.snap_to_timer(tw)
+                break
+        self.save_position()
+        self.dock_changed.emit()
+
+    def unbind_timer(self):
+        self.pet_data["bound_timer_id"] = ""
+        self.save_position()
+        self.dock_changed.emit()
+
+    def save_position(self):
+        self.pet_data["x"] = self.x()
+        self.pet_data["y"] = self.y()
+        config_mgr.save_config()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    # ui/pet_widget.py -> mouseMoveEvent 교체
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            new_pos = event.globalPosition().toPoint() - self.drag_position
+            if config_mgr.config.get("settings", {}).get("clamp_to_screen", True):
+                screen = QApplication.screenAt(event.globalPosition().toPoint()) or QApplication.primaryScreen()
+                if screen:
+                    geo = screen.availableGeometry()
+                    new_pos = QPoint(max(geo.left(), min(new_pos.x(), geo.right() - self.width())), max(geo.top(), min(new_pos.y(), geo.bottom() - self.height())))
+            self.move(new_pos)
+            bound_id = self.pet_data.get("bound_timer_id", "")
+            if bound_id:
+                for tw in self.get_all_timers_callback():
+                    if tw.timer_data.get("id") == bound_id:
+                        m = getattr(tw, "SHADOW_MARGIN", 0)
+                        t_x = int(new_pos.x() + (self.width() - tw.width()) / 2)
+                        t_y = int(new_pos.y() + self.height() - m - 4)
+                        tw.move(t_x, t_y)
+                        tw.timer_data["x"], tw.timer_data["y"] = t_x, t_y
+                        break
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self.save_position()
+        bound_id = self.pet_data.get("bound_timer_id", "")
+        if bound_id:
+            for tw in self.get_all_timers_callback():
+                if tw.timer_data.get("id") == bound_id:
+                    tw.timer_data["x"], tw.timer_data["y"] = tw.x(), tw.y()
+                    config_mgr.save_config()
+                    break
+        else:
+            dropped_center = self.geometry().center()
+            matched = next((tw for tw in self.get_all_timers_callback() if tw.geometry().adjusted(-20, -70, 20, 20).contains(dropped_center)), None)
+            if matched: self.bind_to_timer(matched.timer_data.get("id"))
+        event.accept()
+
+    def contextMenuEvent(self, event: QContextMenuEvent):
+            menu = StyledMenu(self)
+            settings_act = menu.addAction(I18n.tr("open_settings"))
+            duplicate_act = menu.addAction(I18n.tr("duplicate_pet"))
+            remove_act = menu.addAction(I18n.tr("remove_pet"))
+            menu.addSeparator()
+
+            if self.pet_data.get("bound_timer_id", ""):
+                menu.addAction(I18n.tr("unbind_timer")).triggered.connect(self.unbind_timer)
+            else:
+                dock_menu = menu.addStyledMenu(I18n.tr("bind_timer"))
+                timers = self.get_all_timers_callback()
+                if timers:
+                    for tw in timers:
+                        t_id = tw.timer_data.get("id")
+                        dock_menu.addAction(
+                            tw.timer_data.get("name", I18n.tr("default_timer_name"))
+                        ).triggered.connect(lambda checked, tid=t_id: self.bind_to_timer(tid))
+                else:
+                    dock_menu.setEnabled(False)
+
+            menu.addSeparator()
+            skin_menu = menu.addStyledMenu(I18n.tr("change_skin"))
+            cur_skin = self.pet_data.get("skin", "default")
+            if os.path.exists(SKINS_DIR):
+                for s_name in sorted(os.listdir(SKINS_DIR)):
+                    if os.path.isdir(os.path.join(SKINS_DIR, s_name)):
+                        act = skin_menu.addAction(s_name)
+                        act.setCheckable(True)
+                        if s_name == cur_skin:
+                            act.setChecked(True)
+                        act.triggered.connect(lambda chk, n=s_name: self.change_skin_direct(n))
+
+            menu.addSeparator()
+            exit_act = menu.addAction(I18n.tr("tray_exit"))
+
+            chosen = menu.exec(event.globalPos())
+            if chosen == settings_act and self.open_settings_callback:
+                self.open_settings_callback()
+            elif chosen == duplicate_act and self.duplicate_callback:
+                self.duplicate_callback(self.pet_data)
+            elif chosen == remove_act and self.remove_callback:
+                self.remove_callback(self.pet_data.get("id"))
+            elif chosen == exit_act:
+                if self.quit_callback:
+                    self.quit_callback()
+                else:
+                    QApplication.quit()
+
+    def change_skin_direct(self, new_skin):
+        self.pet_data["skin"] = new_skin
+        config_mgr.save_config()
+        self.load_resources()
+        self.initial_dock_check()
+        self.skin_changed.emit(self.pet_data.get("id"), new_skin)
+        self.dock_changed.emit()
+
+==================================================
+FILE: ui/settings/main_window.py
+==================================================
+
+# ui/settings/main_window.py
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QFrame, QPushButton
+from PyQt6.QtCore import Qt, pyqtSignal
+from core.config_manager import config_mgr
+from core.i18n import I18n
+from ui.theme import LIGHT_THEME, DARK_THEME
+from ui.components import CustomTitleBar, ConfirmDialog
+from ui.settings.tab_timer import TabTimerSettings
+from ui.settings.tab_pet import TabPetSettings
+from ui.settings.tab_sound import TabSoundSettings
+
+
+class MainSettingWindow(QWidget):
+    settings_updated = pyqtSignal()
+    timer_name_updated = pyqtSignal(str, str)
+    quit_requested = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedWidth(560)
+        self.setMinimumHeight(680)
+
+        self.is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+        self.init_ui()
+        self.apply_theme()
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def init_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self.root = QWidget()
+        self.root.setObjectName("settingsRoot")
+        r_layout = QVBoxLayout(self.root)
+        r_layout.setContentsMargins(20, 8, 20, 16)
+        r_layout.setSpacing(0)
+
+        self.title_bar = CustomTitleBar(self, "app_title")
+        self.title_bar.layout().setContentsMargins(4, 0, 4, 0)
+        self.title_bar.theme_toggled.connect(self.toggle_theme)
+        r_layout.addWidget(self.title_bar)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("mainTabWidget")
+        self.tab_timer = TabTimerSettings()
+        self.tab_pet = TabPetSettings()
+        self.tab_sound = TabSoundSettings()
+
+        self.tab_timer.settings_changed.connect(self.on_child_settings_changed)
+        self.tab_timer.timer_name_changed.connect(self.on_timer_name_changed)
+        self.tab_pet.settings_changed.connect(self.on_child_settings_changed)
+
+        self.tabs.addTab(self.tab_timer, I18n.tr("tab_timer"))
+        self.tabs.addTab(self.tab_pet, I18n.tr("tab_pet"))
+        self.tabs.addTab(self.tab_sound, I18n.tr("tab_sound"))
+        r_layout.addWidget(self.tabs, 1)
+
+        # 하단 파란 구분선
+        bottom_line = QFrame()
+        bottom_line.setObjectName("accentDivider")
+        bottom_line.setFixedHeight(1)
+        r_layout.addWidget(bottom_line)
+
+        # 하단 우측 프로그램 종료 버튼
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(4, 12, 4, 0)
+        bottom_bar.addStretch()
+        self.btn_quit = QPushButton(I18n.tr("program_exit_btn"))
+        self.btn_quit.setProperty("actionType", "danger")
+        self.btn_quit.clicked.connect(self.confirm_quit)
+        bottom_bar.addWidget(self.btn_quit)
+        r_layout.addLayout(bottom_bar)
+
+        outer.addWidget(self.root)
+
+    def on_child_settings_changed(self):
+        self.tab_pet.sync_pet_cards_state()
+        self.settings_updated.emit()
+
+    def on_timer_name_changed(self, timer_id: str, new_name: str):
+        self.tab_pet.sync_pet_cards_state()
+        self.timer_name_updated.emit(timer_id, new_name)
+
+    def toggle_theme(self):
+        self.is_dark = not self.is_dark
+        config_mgr.config.setdefault("settings", {})["dark_mode"] = self.is_dark
+        config_mgr.save_config()
+        self.apply_theme()
+        self.settings_updated.emit()
+
+    def apply_theme(self):
+        self.setStyleSheet(DARK_THEME if self.is_dark else LIGHT_THEME)
+        self.title_bar.theme_btn.setText("light" if self.is_dark else "dark")
+
+        self.root.style().unpolish(self.root)
+        self.root.style().polish(self.root)
+        self.update()
+
+    def confirm_quit(self):
+        dlg = ConfirmDialog(
+            I18n.tr("exit_confirm_title"),
+            I18n.tr("exit_confirm_msg"),
+            is_danger=True,
+            parent=self
+        )
+        if dlg.exec() == ConfirmDialog.DialogCode.Accepted:
+            self.quit_requested.emit()
+
+    def retranslate_ui(self):
+        self.tabs.setTabText(0, I18n.tr("tab_timer"))
+        self.tabs.setTabText(1, I18n.tr("tab_pet"))
+        self.tabs.setTabText(2, I18n.tr("tab_sound"))
+        self.btn_quit.setText(I18n.tr("program_exit_btn"))
+
+        self.tab_timer.retranslate_ui()
+        self.tab_pet.retranslate_ui()
+        self.tab_sound.key_grp.retranslate_ui()
+        self.tab_sound.click_grp.retranslate_ui()
+
+==================================================
+FILE: ui/settings/tab_pet.py
+==================================================
+
+# ui/settings/tab_pet.py
+import os
+import uuid
+import zipfile
+import shutil
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
+    QPushButton, QLabel, QLineEdit, QComboBox, QSpinBox,
+    QSlider, QFileDialog, QMessageBox, QInputDialog, QTabWidget, QCheckBox
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtGui import QDesktopServices, QPixmap, QFontMetrics
+from core.config_manager import config_mgr, SKINS_DIR
+from core.i18n import I18n
+from ui.components import KeyCaptureButton, AlertDialog
+
+class PetRowWidget(QWidget):
+    changed = pyqtSignal()
+
+    def __init__(self, pet_data, remove_callback, parent=None):
+        super().__init__(parent)
+        self.pet_data = pet_data
+        self.remove_callback = remove_callback
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(12)
+
+        self.preview_label = QLabel()
+        self.preview_label.setFixedSize(36, 36)
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.preview_label)
+
+        self.skin_combo = QComboBox()
+        self.skin_combo.setFixedWidth(130)
+        self.refresh_skins()
+        self.skin_combo.setCurrentText(self.pet_data.get("skin", "default"))
+        self.skin_combo.currentTextChanged.connect(self.on_skin_changed)
+        layout.addWidget(self.skin_combo)
+
+        cur_pct = int(round(self.pet_data.get("scale", 1.0) * 100))
+        self.scale_spin = QSpinBox()
+        self.scale_spin.setFixedWidth(70)
+        self.scale_spin.setRange(10, 150)
+        self.scale_spin.setSingleStep(5)
+        self.scale_spin.setValue(cur_pct)
+        self.scale_spin.setSuffix("%")
+        self.scale_spin.valueChanged.connect(self.on_scale_changed)
+        layout.addWidget(self.scale_spin)
+
+        self.bound_combo = QComboBox()
+        self.bound_combo.setFixedWidth(140)
+        self.refresh_timers()
+        self.bound_combo.currentIndexChanged.connect(self.on_bound_timer_changed)
+        layout.addWidget(self.bound_combo)
+
+        layout.addStretch()
+
+        self.btn_del = QPushButton(I18n.tr("remove_pet"))
+        self.btn_del.setProperty("actionType", "danger")
+        self.btn_del.setFixedWidth(45)
+        self.btn_del.clicked.connect(lambda: self.remove_callback(self.pet_data))
+        layout.addWidget(self.btn_del)
+
+        self.update_preview()
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def sync_from_data(self):
+        self.refresh_skins()
+        self.skin_combo.blockSignals(True)
+        self.skin_combo.setCurrentText(self.pet_data.get("skin", "default"))
+        self.skin_combo.blockSignals(False)
+
+        self.scale_spin.blockSignals(True)
+        self.scale_spin.setValue(int(round(self.pet_data.get("scale", 1.0) * 100)))
+        self.scale_spin.blockSignals(False)
+
+        self.refresh_timers()
+        self.update_preview()
+
+    def refresh_skins(self):
+        self.skin_combo.blockSignals(True)
+        self.skin_combo.clear()
+        skins = [d for d in os.listdir(SKINS_DIR) if os.path.isdir(os.path.join(SKINS_DIR, d))]
+        self.skin_combo.addItems(sorted(skins))
+        self.skin_combo.blockSignals(False)
+
+    def refresh_timers(self):
+        self.bound_combo.blockSignals(True)
+        self.bound_combo.clear()
+        self.bound_combo.addItem(I18n.tr("unbound"), "")
+        cur_bound = self.pet_data.get("bound_timer_id", "")
+        sel_idx = 0
+        for idx, t in enumerate(config_mgr.config.get("timers", [])):
+            name = t.get("name", I18n.tr("default_timer_name"))
+            t_id = t.get("id")
+            self.bound_combo.addItem(name, t_id)
+            if t_id == cur_bound: sel_idx = idx + 1
+        self.bound_combo.setCurrentIndex(sel_idx)
+        self.bound_combo.blockSignals(False)
+
+    def on_skin_changed(self, skin_name):
+        if not skin_name: return
+        self.pet_data["skin"] = skin_name
+        config_mgr.save_config()
+        self.update_preview()
+        self.changed.emit()
+
+    def on_scale_changed(self, val):
+        self.pet_data["scale"] = round(val / 100.0, 2)
+        config_mgr.save_config()
+        self.changed.emit()
+
+    def on_bound_timer_changed(self, idx):
+        t_id = self.bound_combo.itemData(idx)
+        if t_id:
+            for p in config_mgr.config.get("pets", []):
+                if p.get("bound_timer_id") == t_id and p.get("id") != self.pet_data.get("id"):
+                    p["bound_timer_id"] = ""
+        self.pet_data["bound_timer_id"] = t_id or ""
+        config_mgr.save_config()
+        self.changed.emit()
+
+    def update_preview(self):
+        skin = self.pet_data.get("skin", "default")
+        conf = config_mgr.get_skin_config(skin)
+        idle_file = os.path.join(SKINS_DIR, skin, conf.get("idle_image", "idle.png"))
+        if os.path.exists(idle_file):
+            pix = QPixmap(idle_file)
+            if not pix.isNull():
+                self.preview_label.setPixmap(pix.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                return
+        self.preview_label.clear()
+        self.preview_label.setText("Img")
+
+    def retranslate_ui(self):
+        self.refresh_timers()
+        self.btn_del.setText(I18n.tr("remove_pet"))
+
+
+class TabPetSettings(QWidget):
+    settings_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_editing_skin = "default"
+        self.is_loading_skin = False
+        self.init_ui()
+        self.load_skin_list()
+        self.load_current_skin_config()
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.sub_tabs = QTabWidget()
+        self.sub_tabs.setObjectName("subTabWidget")
+
+        # 1. 일반 설정 서브 탭
+        self.sub_page_general = QWidget()
+        l_g = QVBoxLayout(self.sub_page_general)
+        l_g.setContentsMargins(14, 14, 14, 14)
+        l_g.setSpacing(14)
+
+        self.clamp_cb = QCheckBox(I18n.tr("clamp_to_screen"))
+        self.clamp_cb.setChecked(config_mgr.config.get("settings", {}).get("clamp_to_screen", True))
+        self.clamp_cb.toggled.connect(lambda c: self.save_opt("clamp_to_screen", c))
+
+        self.click_thru_cb = QCheckBox(I18n.tr("click_through"))
+        self.click_thru_cb.setChecked(config_mgr.config.get("settings", {}).get("click_through", False))
+        self.click_thru_cb.toggled.connect(lambda c: self.save_opt("click_through", c))
+
+        self.tray_mode_cb = QCheckBox(I18n.tr("tray_mode"))
+        self.tray_mode_cb.setChecked(config_mgr.config.get("settings", {}).get("tray_mode", False))
+        self.tray_mode_cb.toggled.connect(lambda c: self.save_opt("tray_mode", c))
+
+        l_g.addWidget(self.clamp_cb)
+        l_g.addWidget(self.click_thru_cb)
+        l_g.addWidget(self.tray_mode_cb)
+        l_g.addStretch()
+
+        # 2. 활성 펫 관리 서브 탭 (스크롤 지원)
+        self.sub_page_pets = QWidget()
+        l_p = QVBoxLayout(self.sub_page_pets)
+        l_p.setContentsMargins(12, 12, 12, 12)
+        l_p.setSpacing(10)
+
+        top_p = QHBoxLayout()
+        top_p.addStretch()
+        self.btn_add_pet = QPushButton(f"+ {I18n.tr('add_pet')}")
+        self.btn_add_pet.setProperty("actionType", "primary")
+        self.btn_add_pet.clicked.connect(self.add_pet)
+        top_p.addWidget(self.btn_add_pet)
+        l_p.addLayout(top_p)
+
+        scroll_p = QScrollArea()
+        scroll_p.setWidgetResizable(True)
+        p_content = QWidget()
+        self.pet_list_layout = QVBoxLayout(p_content)
+        self.pet_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.pet_list_layout.setSpacing(4)
+        self.pet_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_p.setWidget(p_content)
+        l_p.addWidget(scroll_p)
+
+        # 3. 스킨 에디터 서브 탭 (스크롤 지원)
+        self.sub_page_skin = QWidget()
+        l_s_outer = QVBoxLayout(self.sub_page_skin)
+        l_s_outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll_s = QScrollArea()
+        scroll_s.setWidgetResizable(True)
+        skin_content = QWidget()
+        layout_skin = QVBoxLayout(skin_content)
+        layout_skin.setContentsMargins(14, 14, 14, 14)
+        layout_skin.setSpacing(16)
+
+        bar_s = QHBoxLayout()
+        self.skin_combo = QComboBox()
+        self.skin_combo.currentTextChanged.connect(self.on_skin_selected)
+        self.btn_new_skin = QPushButton(f"+ {I18n.tr('create_skin')}")
+        self.btn_new_skin.setProperty("actionType", "primary")
+        self.btn_new_skin.clicked.connect(self.create_new_skin)
+        self.btn_open_folder = QPushButton(I18n.tr("open_skin_folder"))
+        self.btn_open_folder.clicked.connect(self.open_skin_folder)
+
+        bar_s.addWidget(self.skin_combo, 2)
+        bar_s.addWidget(self.btn_new_skin, 1)
+        bar_s.addWidget(self.btn_open_folder, 1)
+        layout_skin.addLayout(bar_s)
+
+        self.skin_bounce_cb = QCheckBox(I18n.tr("enable_bounce_animation"))
+        self.skin_bounce_cb.toggled.connect(self.on_skin_bounce_toggled)
+        layout_skin.addWidget(self.skin_bounce_cb)
+
+        squash_layout = QHBoxLayout()
+        self.lbl_squash_title = QLabel(I18n.tr("squash_depth"))
+        self.squash_slider = QSlider(Qt.Orientation.Horizontal)
+        self.squash_slider.setRange(1, 100)
+        self.squash_slider.valueChanged.connect(self.on_squash_slider)
+        self.squash_lbl = QLabel("20%")
+        self.squash_lbl.setFixedWidth(40)
+        squash_layout.addWidget(self.lbl_squash_title)
+        squash_layout.addWidget(self.squash_slider, 1)
+        squash_layout.addWidget(self.squash_lbl)
+        layout_skin.addLayout(squash_layout)
+
+        # 3열 모션 미리보기
+        motions_grid = QHBoxLayout()
+        motions_grid.setSpacing(20)
+
+        def make_motion_col(title_key, preview_lbl, name_lbl, browse_btn_ref, motion_type):
+            w = QWidget()
+            col = QVBoxLayout(w)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(6)
+            lbl = QLabel(I18n.tr(title_key))
+            lbl.setStyleSheet("font-weight: 600; font-size: 11px;")
+            preview_lbl.setFixedSize(70, 70)
+            preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            preview_lbl.setStyleSheet("background-color: rgba(128,128,128,0.06); border: 1px dashed #2563EB; border-radius: 6px;")
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            name_lbl.setStyleSheet("font-size: 11px; color: #6B7280;")
+            browse_btn_ref.setText(I18n.tr("browse"))
+            browse_btn_ref.clicked.connect(lambda: self.browse_base_image(motion_type))
+            col.addWidget(lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+            col.addWidget(preview_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+            col.addWidget(name_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
+            col.addWidget(browse_btn_ref, alignment=Qt.AlignmentFlag.AlignHCenter)
+            return w
+
+        self.idle_preview = QLabel("No Img")
+        self.idle_name_lbl = QLabel("idle.png")
+        self.idle_browse_btn = QPushButton()
+        col1 = make_motion_col("idle_image", self.idle_preview, self.idle_name_lbl, self.idle_browse_btn, "idle")
+
+        self.tap1_preview = QLabel("No Img")
+        self.tap1_name_lbl = QLabel("tap_left.png")
+        self.tap1_browse_btn = QPushButton()
+        col2 = make_motion_col("tap1_image", self.tap1_preview, self.tap1_name_lbl, self.tap1_browse_btn, "tap1")
+
+        self.tap2_preview = QLabel("No Img")
+        self.tap2_name_lbl = QLabel("tap_right.png")
+        self.tap2_browse_btn = QPushButton()
+        col3 = make_motion_col("tap2_image", self.tap2_preview, self.tap2_name_lbl, self.tap2_browse_btn, "tap2")
+
+        motions_grid.addWidget(col1)
+        motions_grid.addWidget(col2)
+        motions_grid.addWidget(col3)
+        layout_skin.addLayout(motions_grid)
+
+        # 키 매핑 섹션 (플랫 행 리스트)
+        self.lbl_key_map = QLabel(I18n.tr("key_mapping_section"))
+        self.lbl_key_map.setStyleSheet("font-weight: 700; font-size: 13px; color: #2563EB; margin-top: 8px;")
+        layout_skin.addWidget(self.lbl_key_map)
+
+        self.map_list_layout = QVBoxLayout()
+        self.map_list_layout.setSpacing(4)
+        layout_skin.addLayout(self.map_list_layout)
+
+        btn_map_box = QHBoxLayout()
+        self.btn_add_m = QPushButton(f"+ {I18n.tr('add_mapping')}")
+        self.btn_add_m.setProperty("actionType", "primary")
+        self.btn_add_m.clicked.connect(self.add_mapping_row)
+        btn_map_box.addWidget(self.btn_add_m)
+        btn_map_box.addStretch()
+
+        self.btn_imp = QPushButton(I18n.tr("import_skin"))
+        self.btn_imp.clicked.connect(self.import_skin)
+        self.btn_exp = QPushButton(I18n.tr("export_skin"))
+        self.btn_exp.clicked.connect(self.export_skin)
+        btn_map_box.addWidget(self.btn_imp)
+        btn_map_box.addWidget(self.btn_exp)
+        layout_skin.addLayout(btn_map_box)
+
+        scroll_s.setWidget(skin_content)
+        l_s_outer.addWidget(scroll_s)
+
+        self.sub_tabs.addTab(self.sub_page_general, I18n.tr("tab_general"))
+        self.sub_tabs.addTab(self.sub_page_pets, I18n.tr("subtab_pet_list"))
+        self.sub_tabs.addTab(self.sub_page_skin, I18n.tr("subtab_skin_editor"))
+        main_layout.addWidget(self.sub_tabs)
+
+        self.refresh_pet_list()
+
+    def save_opt(self, key, val):
+        config_mgr.config.setdefault("settings", {})[key] = val
+        config_mgr.save_config()
+        self.settings_changed.emit()
+
+    def add_pet(self):
+        new_pet = {
+            "id": str(uuid.uuid4()),
+            "skin": self.current_editing_skin,
+            "scale": 1.0, "x": 250, "y": 250,
+            "bound_timer_id": ""
+        }
+        config_mgr.config.setdefault("pets", []).append(new_pet)
+        config_mgr.save_config()
+        self.refresh_pet_list()
+        self.settings_changed.emit()
+
+    def remove_pet(self, pet_data):
+        if pet_data in config_mgr.config.get("pets", []):
+            config_mgr.config["pets"].remove(pet_data)
+            config_mgr.save_config()
+            self.refresh_pet_list()
+            self.settings_changed.emit()
+
+    def sync_pet_cards_state(self):
+        pets = config_mgr.config.get("pets", [])
+        if self.pet_list_layout.count() - 1 != len(pets):
+            self.refresh_pet_list()
+            return
+        for i in range(self.pet_list_layout.count() - 1):
+            w = self.pet_list_layout.itemAt(i).widget()
+            if isinstance(w, PetRowWidget): w.sync_from_data()
+
+    def refresh_pet_list(self):
+        while self.pet_list_layout.count():
+            item = self.pet_list_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        for p in config_mgr.config.get("pets", []):
+            row = PetRowWidget(p, self.remove_pet)
+            row.changed.connect(self.settings_changed.emit)
+            self.pet_list_layout.addWidget(row)
+        self.pet_list_layout.addStretch()
+
+    def load_skin_list(self):
+        self.skin_combo.blockSignals(True)
+        self.skin_combo.clear()
+        skins = [d for d in os.listdir(SKINS_DIR) if os.path.isdir(os.path.join(SKINS_DIR, d))]
+        self.skin_combo.addItems(sorted(skins))
+        if self.current_editing_skin in skins:
+            self.skin_combo.setCurrentText(self.current_editing_skin)
+        elif skins:
+            self.current_editing_skin = skins[0]
+            self.skin_combo.setCurrentText(skins[0])
+        self.skin_combo.blockSignals(False)
+
+    def on_skin_selected(self, skin_name):
+        if not skin_name: return
+        self.current_editing_skin = skin_name
+        self.load_current_skin_config()
+
+    def _set_elided_filename(self, label: QLabel, full_name: str, max_width: int = 110):
+        label.setToolTip(full_name)
+        fm = QFontMetrics(label.font())
+        label.setText(fm.elidedText(full_name, Qt.TextElideMode.ElideMiddle, max_width))
+
+    def _update_motion_preview(self, label: QLabel, filename: str):
+        f_path = os.path.join(SKINS_DIR, self.current_editing_skin, filename)
+        if filename and os.path.exists(f_path):
+            pix = QPixmap(f_path)
+            if not pix.isNull():
+                label.setPixmap(pix.scaled(60, 60, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                return
+        label.clear()
+        label.setText("No Img")
+
+    def _copy_image_into_skin_dir(self, src_path: str) -> str:
+        s_dir = os.path.abspath(os.path.join(SKINS_DIR, self.current_editing_skin))
+        os.makedirs(s_dir, exist_ok=True)
+        src_abs = os.path.abspath(src_path)
+        file_name = os.path.basename(src_abs)
+        dest_abs = os.path.join(s_dir, file_name)
+        if src_abs != dest_abs:
+            try: shutil.copy2(src_abs, dest_abs)
+            except Exception: pass
+        return file_name
+
+    def load_current_skin_config(self):
+        self.is_loading_skin = True
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+        s_val = int(round(conf.get("squash_depth", 0.20) * 100))
+        self.squash_slider.setValue(s_val)
+        self.squash_lbl.setText(f"{s_val}%")
+        
+        self.skin_bounce_cb.blockSignals(True)
+        self.skin_bounce_cb.setChecked(conf.get("enable_bounce", True))
+        self.skin_bounce_cb.blockSignals(False)
+
+        idle_file = conf.get("idle_image", "idle.png")
+        tap_list = conf.get("tap_images", ["tap_left.png", "tap_right.png"])
+        t1 = tap_list[0] if len(tap_list) > 0 else "tap_left.png"
+        t2 = tap_list[1] if len(tap_list) > 1 else t1
+
+        self._set_elided_filename(self.idle_name_lbl, idle_file)
+        self._update_motion_preview(self.idle_preview, idle_file)
+        self._set_elided_filename(self.tap1_name_lbl, t1)
+        self._update_motion_preview(self.tap1_preview, t1)
+        self._set_elided_filename(self.tap2_name_lbl, t2)
+        self._update_motion_preview(self.tap2_preview, t2)
+
+        while self.map_list_layout.count():
+            item = self.map_list_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
+        for k, v in conf.get("key_mappings", {}).items():
+            self.insert_map_row(k, v)
+
+        self.is_loading_skin = False
+
+    def on_skin_bounce_toggled(self, checked):
+        if self.is_loading_skin: return
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+        conf["enable_bounce"] = checked
+        config_mgr.save_skin_config(self.current_editing_skin, conf)
+        self.settings_changed.emit()
+
+    def on_squash_slider(self, val):
+        self.squash_lbl.setText(f"{val}%")
+        if self.is_loading_skin: return
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+        conf["squash_depth"] = round(val / 100.0, 2)
+        config_mgr.save_skin_config(self.current_editing_skin, conf)
+        self.settings_changed.emit()
+
+    def browse_base_image(self, motion_type: str):
+        s_dir = os.path.join(SKINS_DIR, self.current_editing_skin)
+        path, _ = QFileDialog.getOpenFileName(self, I18n.tr("image_filter"), s_dir, I18n.tr("image_filter"))
+        if not path: return
+        file_name = self._copy_image_into_skin_dir(path)
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+
+        if motion_type == "idle":
+            conf["idle_image"] = file_name
+            self._set_elided_filename(self.idle_name_lbl, file_name)
+            self._update_motion_preview(self.idle_preview, file_name)
+        elif motion_type == "tap1":
+            t_list = conf.get("tap_images", ["tap_left.png", "tap_right.png"])
+            t2 = t_list[1] if len(t_list) > 1 else t_list[0]
+            conf["tap_images"] = [file_name, t2]
+            self._set_elided_filename(self.tap1_name_lbl, file_name)
+            self._update_motion_preview(self.tap1_preview, file_name)
+        elif motion_type == "tap2":
+            t_list = conf.get("tap_images", ["tap_left.png", "tap_right.png"])
+            t1 = t_list[0] if len(t_list) > 0 else "tap_left.png"
+            conf["tap_images"] = [t1, file_name]
+            self._set_elided_filename(self.tap2_name_lbl, file_name)
+            self._update_motion_preview(self.tap2_preview, file_name)
+
+        config_mgr.save_skin_config(self.current_editing_skin, conf)
+        self.sync_pet_cards_state()
+        self.settings_changed.emit()
+
+    def insert_map_row(self, key_text, img_text):
+        row_w = QWidget()
+        h = QHBoxLayout(row_w)
+        h.setContentsMargins(0, 2, 0, 2)
+        h.setSpacing(10)
+
+        btn_key = KeyCaptureButton(key_text)
+        btn_key.setFixedWidth(120)
+        btn_key.keyCaptured.connect(lambda _: self.save_map_from_table())
+        h.addWidget(btn_key)
+
+        le = QLineEdit(img_text)
+        le.setFixedHeight(26)
+        le.textChanged.connect(lambda _: self.save_map_from_table())
+        h.addWidget(le, 1)
+
+        btn_browse = QPushButton(I18n.tr("col_browse"))
+        btn_browse.setFixedWidth(65)
+        btn_browse.clicked.connect(lambda _, target=le: self.browse_image(target))
+        h.addWidget(btn_browse)
+
+        btn_del = QPushButton(I18n.tr("del_mapping"))
+        btn_del.setProperty("actionType", "danger")
+        btn_del.setFixedWidth(45)
+        btn_del.clicked.connect(lambda: (row_w.deleteLater(), self.save_map_from_table()))
+        h.addWidget(btn_del)
+
+        self.map_list_layout.addWidget(row_w)
+
+    def browse_image(self, target_le):
+        s_dir = os.path.join(SKINS_DIR, self.current_editing_skin)
+        path, _ = QFileDialog.getOpenFileName(self, I18n.tr("image_filter"), s_dir, I18n.tr("image_filter"))
+        if path:
+            file_name = self._copy_image_into_skin_dir(path)
+            target_le.setText(file_name)
+
+    def add_mapping_row(self):
+        self.insert_map_row("space", "tap_left.png")
+        self.save_map_from_table()
+
+    def save_map_from_table(self):
+        if self.is_loading_skin: return
+        maps = {}
+        for i in range(self.map_list_layout.count()):
+            w = self.map_list_layout.itemAt(i).widget()
+            if w:
+                btn_k = w.findChild(KeyCaptureButton)
+                le_img = w.findChild(QLineEdit)
+                if btn_k and le_img:
+                    k = btn_k.raw_key.strip().lower()
+                    img = le_img.text().strip()
+                    if k and img: maps[k] = img
+        conf = config_mgr.get_skin_config(self.current_editing_skin)
+        conf["key_mappings"] = maps
+        config_mgr.save_skin_config(self.current_editing_skin, conf)
+        self.settings_changed.emit()
+
+    def create_new_skin(self):
+        name, ok = QInputDialog.getText(self, I18n.tr("create_skin"), I18n.tr("create_skin_prompt"))
+        if ok and name.strip():
+            clean_name = name.strip()
+            folder = os.path.join(SKINS_DIR, clean_name)
+            if os.path.exists(folder):
+                AlertDialog(I18n.tr("error"), I18n.tr("skin_exists_warn"), self).exec()
+                return
+            os.makedirs(folder, exist_ok=True)
+            config_mgr.save_skin_config(clean_name, {
+                "name": clean_name, "squash_depth": 0.20, "enable_bounce": True,
+                "idle_image": "idle.png", "tap_images": ["tap_left.png", "tap_right.png"], "key_mappings": {}
+            })
+            self.current_editing_skin = clean_name
+            self.load_skin_list()
+            self.load_current_skin_config()
+            self.sync_pet_cards_state()
+
+    def open_skin_folder(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.join(SKINS_DIR, self.current_editing_skin)))
+
+    def import_skin(self):
+        path, _ = QFileDialog.getOpenFileName(self, I18n.tr("open_skin_zip"), "", I18n.tr("zip_filter"))
+        if not path: return
+        skin_name = os.path.splitext(os.path.basename(path))[0].strip()
+        target_dir = os.path.join(SKINS_DIR, skin_name)
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            with zipfile.ZipFile(path, 'r') as zf:
+                for member in zf.infolist():
+                    if member.filename.startswith("__MACOSX") or member.filename.endswith(".DS_Store"): continue
+                    zf.extract(member, target_dir)
+            entries = [e for e in os.listdir(target_dir) if e not in ("__MACOSX", ".DS_Store")]
+            if len(entries) == 1:
+                nested = os.path.join(target_dir, entries[0])
+                if os.path.isdir(nested):
+                    for item in os.listdir(nested):
+                        shutil.move(os.path.join(nested, item), os.path.join(target_dir, item))
+                    os.rmdir(nested)
+            self.current_editing_skin = skin_name
+            self.load_skin_list()
+            self.load_current_skin_config()
+            self.sync_pet_cards_state()
+            AlertDialog(I18n.tr("complete"), I18n.tr("applied"), self).exec()
+        except Exception as e:
+            QMessageBox.critical(self, I18n.tr("error"), str(e))
+
+    def export_skin(self):
+        source = os.path.join(SKINS_DIR, self.current_editing_skin)
+        save_path, _ = QFileDialog.getSaveFileName(self, I18n.tr("save_skin_zip"), f"{self.current_editing_skin}.zip", I18n.tr("zip_filter"))
+        if not save_path: return
+        try:
+            base_out = save_path[:-4] if save_path.lower().endswith('.zip') else save_path
+            shutil.make_archive(base_out, 'zip', source)
+            AlertDialog(I18n.tr("complete"), I18n.tr("applied"), self).exec()
+        except Exception as e:
+            QMessageBox.critical(self, I18n.tr("error"), str(e))
+
+    def retranslate_ui(self):
+        self.sub_tabs.setTabText(0, I18n.tr("tab_general"))
+        self.sub_tabs.setTabText(1, I18n.tr("subtab_pet_list"))
+        self.sub_tabs.setTabText(2, I18n.tr("subtab_skin_editor"))
+        self.clamp_cb.setText(I18n.tr("clamp_to_screen"))
+        self.click_thru_cb.setText(I18n.tr("click_through"))
+        self.tray_mode_cb.setText(I18n.tr("tray_mode"))
+        self.btn_add_pet.setText(f"+ {I18n.tr('add_pet')}")
+        self.btn_new_skin.setText(f"+ {I18n.tr('create_skin')}")
+        self.btn_open_folder.setText(I18n.tr("open_skin_folder"))
+        self.skin_bounce_cb.setText(I18n.tr("enable_bounce_animation"))
+        self.lbl_squash_title.setText(I18n.tr("squash_depth"))
+        self.idle_browse_btn.setText(I18n.tr("browse"))
+        self.tap1_browse_btn.setText(I18n.tr("browse"))
+        self.tap2_browse_btn.setText(I18n.tr("browse"))
+        self.lbl_key_map.setText(I18n.tr("key_mapping_section"))
+        self.btn_add_m.setText(f"+ {I18n.tr('add_mapping')}")
+        self.btn_imp.setText(I18n.tr("import_skin"))
+        self.btn_exp.setText(I18n.tr("export_skin"))
+        for i in range(self.pet_list_layout.count()):
+            w = self.pet_list_layout.itemAt(i).widget()
+            if isinstance(w, PetRowWidget): w.retranslate_ui()
+
+    def apply_theme(self):
+        pass
+
+==================================================
+FILE: ui/settings/tab_sound.py
+==================================================
+
+# ui/settings/tab_sound.py
+import os
+import shutil
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
+    QComboBox, QCheckBox, QFileDialog, QMessageBox, QScrollArea, QPushButton
+)
+from PyQt6.QtCore import Qt
+from core.config_manager import config_mgr, USER_SOUNDS_DIR
+from core.sound_manager import sound_mgr, scan_sound_files
+from core.i18n import I18n
+
+class SoundGroupWidget(QWidget):
+    def __init__(self, title_key, prefix, parent=None):
+        super().__init__(parent)
+        self.title_key = title_key
+        self.prefix = prefix
+        self.init_ui()
+        self.retranslate_ui()
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 8, 0, 16)
+        layout.setSpacing(10)
+
+        top_h = QHBoxLayout()
+        self.title_lbl = QLabel()
+        self.title_lbl.setStyleSheet("font-weight: 700; font-size: 14px; color: #2563EB;")
+        top_h.addWidget(self.title_lbl)
+        top_h.addStretch()
+
+        snd_conf = config_mgr.config.get("sound", {})
+        self.enable_cb = QCheckBox(I18n.tr("sound_enable"))
+        self.enable_cb.setChecked(snd_conf.get(f"{self.prefix}_sound_enabled", True))
+        self.enable_cb.toggled.connect(self.on_enable_toggled)
+        top_h.addWidget(self.enable_cb)
+        layout.addLayout(top_h)
+
+        vol_box = QHBoxLayout()
+        self.vol_lbl = QLabel(I18n.tr("volume"))
+        self.vol_lbl.setFixedWidth(60)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 100)
+        self.slider.setValue(snd_conf.get(f"{self.prefix}_volume", 50))
+        self.slider.valueChanged.connect(self.on_vol_changed)
+        self.vol_val = QLabel(f"{self.slider.value()}%")
+        self.vol_val.setFixedWidth(40)
+        vol_box.addWidget(self.vol_lbl)
+        vol_box.addWidget(self.slider, 1)
+        vol_box.addWidget(self.vol_val)
+        layout.addLayout(vol_box)
+
+        snd_box = QHBoxLayout()
+        self.pick_lbl = QLabel(I18n.tr("select_sound"))
+        self.pick_lbl.setFixedWidth(80)
+        self.combo = QComboBox()
+        self.combo.setFixedHeight(28)
+        self.combo.currentIndexChanged.connect(self.on_sound_selected)
+
+        self.btn_upload = QPushButton(I18n.tr("upload_sound"))
+        self.btn_upload.clicked.connect(self.upload_wav)
+
+        snd_box.addWidget(self.pick_lbl)
+        snd_box.addWidget(self.combo, 1)
+        snd_box.addWidget(self.btn_upload)
+        layout.addLayout(snd_box)
+
+        self.line = QLabel()
+        self.line.setFixedHeight(1)
+        self.line.setStyleSheet("background-color: #2563EB;")
+        layout.addWidget(self.line)
+
+    def populate(self):
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        sounds = scan_sound_files()
+        cur = config_mgr.config.get("sound", {}).get(f"{self.prefix}_sound_path", "")
+        sel_idx = 0
+        idx = 0
+        for name, path in sounds.items():
+            self.combo.addItem(name, path)
+            if cur and (cur == path or os.path.basename(cur) == os.path.basename(path)):
+                sel_idx = idx
+            idx += 1
+        self.combo.addItem(I18n.tr("upload_sound") + "...", "__upload__")
+        self.combo.setCurrentIndex(sel_idx)
+        self.combo.blockSignals(False)
+
+    def on_enable_toggled(self, chk):
+        config_mgr.config.setdefault("sound", {})[f"{self.prefix}_sound_enabled"] = chk
+        config_mgr.save_config()
+
+    def on_vol_changed(self, val):
+        self.vol_val.setText(f"{val}%")
+        config_mgr.config.setdefault("sound", {})[f"{self.prefix}_volume"] = val
+        config_mgr.save_config()
+        sound_mgr.update_volumes()
+
+    def on_sound_selected(self, idx):
+        if idx < 0: return
+        data = self.combo.itemData(idx)
+        if data == "__upload__":
+            self.upload_wav()
+            return
+        if data:
+            config_mgr.config.setdefault("sound", {})[f"{self.prefix}_sound_path"] = data
+            config_mgr.save_config()
+            sound_mgr.load_sounds()
+            if self.prefix == "key": sound_mgr.play_key()
+            else: sound_mgr.play_click()
+
+    def upload_wav(self):
+        path, _ = QFileDialog.getOpenFileName(self, I18n.tr("select_wav"), "", "WAV Files (*.wav)")
+        if not path:
+            self.populate()
+            return
+        if not sound_mgr.is_valid_wav(path, 2.5):
+            QMessageBox.warning(self, I18n.tr("error"), I18n.tr("upload_err"))
+            self.populate()
+            return
+        dest = os.path.join(USER_SOUNDS_DIR, os.path.basename(path))
+        try:
+            if os.path.abspath(path) != os.path.abspath(dest):
+                shutil.copy2(path, dest)
+            config_mgr.config.setdefault("sound", {})[f"{self.prefix}_sound_path"] = dest
+            config_mgr.save_config()
+            sound_mgr.load_sounds()
+            self.populate()
+            if self.prefix == "key": sound_mgr.play_key()
+            else: sound_mgr.play_click()
+        except Exception as e:
+            QMessageBox.critical(self, I18n.tr("error"), str(e))
+            self.populate()
+
+    def retranslate_ui(self):
+        self.title_lbl.setText(I18n.tr(self.title_key))
+        self.enable_cb.setText(I18n.tr("sound_enable"))
+        self.vol_lbl.setText(I18n.tr("volume"))
+        self.pick_lbl.setText(I18n.tr("select_sound"))
+        self.btn_upload.setText(I18n.tr("upload_sound"))
+        self.populate()
+
+class TabSoundSettings(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(16)
+
+        self.key_grp = SoundGroupWidget("key_sound", "key")
+        self.click_grp = SoundGroupWidget("click_sound", "click")
+
+        layout.addWidget(self.key_grp)
+        layout.addWidget(self.click_grp)
+        layout.addStretch()
+        scroll.setWidget(content)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+==================================================
+FILE: ui/settings/tab_timer.py
+==================================================
+
+# ui/settings/tab_timer.py
+import uuid
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
+    QPushButton, QLabel, QLineEdit, QCheckBox, QComboBox,
+    QSpinBox, QTabWidget, QSizePolicy
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from core.config_manager import config_mgr
+from core.i18n import I18n
+from core.activity_engine import activity_engine
+from ui.components import (
+    ConfirmDialog, capture_bridge,
+    start_window_click_capture, cancel_window_click_capture, format_time
+)
+
+_active_capture_session = None
+
+
+def _clear_active_capture_session():
+    global _active_capture_session
+    if _active_capture_session is not None:
+        card, btn, _, _ = _active_capture_session
+        try:
+            card.reset_btn(btn)
+        except RuntimeError:
+            pass
+        _active_capture_session = None
+
+
+class TimerRowWidget(QWidget):
+    changed = pyqtSignal()
+    name_updated = pyqtSignal(str, str)
+
+    def __init__(self, timer_data, remove_callback, parent=None):
+        super().__init__(parent)
+        self.timer_data = timer_data
+        self.remove_callback = remove_callback
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setSpacing(6)
+
+        # 타이머 이름 (인라인 편집)
+        self.name_edit = QLineEdit(self.timer_data.get("name", I18n.tr("default_timer_name")))
+        self.name_edit.setFixedWidth(130)
+        self.name_edit.textChanged.connect(self.on_name_text_changed)
+        self.name_edit.editingFinished.connect(self.on_name_editing_finished)
+        layout.addWidget(self.name_edit)
+
+        # 그룹 선택 드롭다운
+        self.group_combo = QComboBox()
+        self.group_combo.setFixedWidth(95)
+        self.group_combo.view().setMinimumWidth(130)
+        self.group_combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.refresh_groups()
+        self.group_combo.currentTextChanged.connect(self.on_group_changed)
+        layout.addWidget(self.group_combo)
+
+        # 유휴 시간 (초 스핀박스)
+        self.idle_spin = QSpinBox()
+        self.idle_spin.setFixedWidth(50)
+        self.idle_spin.setRange(1, 999)
+        self.idle_spin.setValue(self.timer_data.get("idle_timeout", 5))
+        self.idle_spin.setSuffix(I18n.tr('unit_seconds'))
+        self.idle_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.idle_spin.valueChanged.connect(self.on_idle_changed)
+        layout.addWidget(self.idle_spin)
+
+        # 누적 시간 표시
+        self.time_label = QLabel(format_time(self.timer_data.get("elapsed_seconds", 0)))
+        self.time_label.setFixedWidth(74)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.time_label.setStyleSheet("font-family: monospace; font-weight: bold;")
+        layout.addWidget(self.time_label)
+
+        layout.addStretch()
+
+        # 정지/재개 토글 버튼
+        is_paused = self.timer_data.get("paused", False)
+        self.btn_pause = QPushButton(I18n.tr("resume") if is_paused else I18n.tr("pause"))
+        self.btn_pause.setProperty("actionType", "primary")
+        self.btn_pause.setFixedWidth(38)
+        self.btn_pause.clicked.connect(self.toggle_pause)
+        layout.addWidget(self.btn_pause)
+
+        # 초기화 버튼
+        self.btn_reset = QPushButton(I18n.tr("reset"))
+        self.btn_reset.setProperty("actionType", "danger")
+        self.btn_reset.setFixedWidth(44)
+        self.btn_reset.clicked.connect(self.reset_time)
+        layout.addWidget(self.btn_reset)
+
+        # 삭제 버튼
+        self.btn_del = QPushButton(I18n.tr("delete"))
+        self.btn_del.setProperty("actionType", "danger")
+        self.btn_del.setFixedWidth(34)
+        self.btn_del.clicked.connect(lambda: self.remove_callback(self.timer_data))
+        layout.addWidget(self.btn_del)
+
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def update_time_display(self, seconds: int):
+        self.timer_data["elapsed_seconds"] = seconds
+        self.time_label.setText(format_time(seconds))
+
+    def refresh_groups(self):
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        groups = list(config_mgr.config.get("groups", {}).keys())
+        if groups:
+            self.group_combo.addItems(groups)
+            cur = self.timer_data.get("group", "")
+            if cur in groups:
+                self.group_combo.setCurrentText(cur)
+            else:
+                self.timer_data["group"] = groups[0]
+                self.group_combo.setCurrentText(groups[0])
+        else:
+            self.group_combo.addItem(I18n.tr("no_group_available"))
+            self.timer_data["group"] = ""
+        self.group_combo.blockSignals(False)
+
+    def retranslate_ui(self):
+        self.idle_spin.setSuffix(I18n.tr('unit_seconds'))
+        self.btn_reset.setText(I18n.tr("reset"))
+        self.btn_del.setText(I18n.tr("delete"))
+        is_paused = self.timer_data.get("paused", False)
+        self.btn_pause.setText(I18n.tr("resume") if is_paused else I18n.tr("pause"))
+
+    def toggle_pause(self):
+        new_state = not self.timer_data.get("paused", False)
+        self.timer_data["paused"] = new_state
+        config_mgr.save_config()
+        self.btn_pause.setText(I18n.tr("resume") if new_state else I18n.tr("pause"))
+        self.changed.emit()
+
+    def on_name_text_changed(self, txt):
+        self.timer_data["name"] = txt
+        self.name_updated.emit(self.timer_data.get("id"), txt)
+
+    def on_name_editing_finished(self):
+        config_mgr.save_config()
+        self.changed.emit()
+
+    def on_group_changed(self, txt):
+        if txt and txt != I18n.tr("no_group_available"):
+            self.timer_data["group"] = txt
+        else:
+            self.timer_data["group"] = ""
+        config_mgr.save_config()
+        self.changed.emit()
+
+    def on_idle_changed(self, val):
+        self.timer_data["idle_timeout"] = val
+        config_mgr.save_config()
+
+    def reset_time(self):
+        dlg = ConfirmDialog(I18n.tr("reset_confirm_title"), I18n.tr("reset_confirm_msg"), is_danger=False, parent=self)
+        if dlg.exec() == ConfirmDialog.DialogCode.Accepted:
+            t_id = self.timer_data.get("id")
+            self.timer_data["elapsed_seconds"] = 0
+            self.time_label.setText(format_time(0))
+            config_mgr.save_config()
+            activity_engine.tick.emit({t_id: 0})
+            self.changed.emit()
+
+
+class GroupSectionWidget(QWidget):
+    def __init__(self, group_name, windows, remove_group_callback, rename_group_callback, parent=None):
+        super().__init__(parent)
+        self.group_name = group_name
+        self.windows = (list(windows) + ["", "", ""])[:3]
+        self.remove_group_callback = remove_group_callback
+        self.rename_group_callback = rename_group_callback
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 6, 4, 14)
+        layout.setSpacing(6)
+
+        # 상단 그룹명 & 삭제 버튼
+        top_h = QHBoxLayout()
+        top_h.setSpacing(8)
+        self.name_edit = QLineEdit(self.group_name)
+        self.name_edit.setFixedWidth(200)
+        self.name_edit.setStyleSheet("font-weight: 700; font-size: 13px;")
+        self.name_edit.editingFinished.connect(self.on_group_rename_finished)
+        top_h.addWidget(self.name_edit)
+        top_h.addStretch()
+
+        self.del_btn = QPushButton(I18n.tr("del_group"))
+        self.del_btn.setProperty("actionType", "danger")
+        self.del_btn.setFixedWidth(36)
+        self.del_btn.setStyleSheet("text-align: right;")
+        self.del_btn.clicked.connect(lambda: self.remove_group_callback(self.group_name))
+        top_h.addWidget(self.del_btn)
+        layout.addLayout(top_h)
+
+        self.slot_labels = []
+        self.slot_edits = []
+        self.slot_pick_btns = []
+        self.slot_clear_btns = []
+
+        for i in range(3):
+            slot_h = QHBoxLayout()
+            slot_h.setContentsMargins(4, 0, 0, 0)
+            slot_h.setSpacing(8)
+
+            lbl = QLabel(f"{i+1}{I18n.tr('slot')}")
+            lbl.setFixedWidth(46)
+            lbl.setStyleSheet("color: #6B7280; font-size: 12px;")
+            self.slot_labels.append(lbl)
+
+            le = QLineEdit(self.windows[i])
+            le.setFixedHeight(26)
+            le.setMinimumWidth(0)
+            le.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            le.setPlaceholderText(I18n.tr("slot_placeholder"))
+            le.textChanged.connect(lambda txt, idx=i: self.on_text_changed(idx, txt))
+            self.slot_edits.append(le)
+
+            btn_p = QPushButton(I18n.tr("pick_window"))
+            btn_p.setFixedWidth(64)
+            btn_p.clicked.connect(lambda _, b=btn_p, edit=le, idx=i: self.start_capture(b, edit, idx))
+            self.slot_pick_btns.append(btn_p)
+
+            btn_c = QPushButton(I18n.tr("clear"))
+            btn_c.setProperty("actionType", "danger")
+            btn_c.setFixedWidth(50)
+            btn_c.setStyleSheet("text-align: right;")
+            btn_c.clicked.connect(lambda _, edit=le, idx=i: self.clear_slot(edit, idx))
+            self.slot_clear_btns.append(btn_c)
+
+            slot_h.addWidget(lbl)
+            slot_h.addWidget(le, 1)
+            slot_h.addWidget(btn_p)
+            slot_h.addWidget(btn_c)
+            layout.addLayout(slot_h)
+
+        # 그룹 간 구분선
+        self.line = QLabel()
+        self.line.setObjectName("subDivider")
+        self.line.setFixedHeight(1)
+        layout.addWidget(self.line)
+
+        capture_bridge.window_captured.connect(self.on_window_captured)
+
+    def on_group_rename_finished(self):
+        new_name = self.name_edit.text().strip()
+        if new_name and new_name != self.group_name:
+            self.rename_group_callback(self.group_name, new_name)
+            self.group_name = new_name
+
+    def retranslate_ui(self):
+        self.del_btn.setText(I18n.tr("del_group"))
+        for i, lbl in enumerate(self.slot_labels):
+            lbl.setText(f"{i+1}{I18n.tr('slot')}")
+        for le in self.slot_edits:
+            le.setPlaceholderText(I18n.tr("slot_placeholder"))
+        for btn in self.slot_pick_btns:
+            if not getattr(btn, 'is_capturing', False):
+                btn.setText(I18n.tr("pick_window"))
+            else:
+                btn.setText(I18n.tr("waiting_click"))
+        for btn in self.slot_clear_btns:
+            btn.setText(I18n.tr("clear"))
+
+    def on_text_changed(self, idx, txt):
+        self.windows[idx] = txt.strip()
+        config_mgr.config.setdefault("groups", {})[self.group_name] = [w for w in self.windows if w]
+        config_mgr.save_config()
+
+    def clear_slot(self, le, idx):
+        le.clear()
+        self.on_text_changed(idx, "")
+
+    def start_capture(self, btn, le, idx):
+        global _active_capture_session
+        if getattr(btn, 'is_capturing', False):
+            _clear_active_capture_session()
+            cancel_window_click_capture()
+            return
+
+        _clear_active_capture_session()
+        btn.is_capturing = True
+        btn.setText(I18n.tr("waiting_click"))
+        btn.setProperty("activeCapture", True)
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+        _active_capture_session = (self, btn, le, idx)
+        start_window_click_capture()
+
+    def reset_btn(self, btn):
+        btn.is_capturing = False
+        btn.setText(I18n.tr("pick_window"))
+        btn.setProperty("activeCapture", False)
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+
+    def on_window_captured(self, slot_text: str, is_cancelled: bool):
+        global _active_capture_session
+        if _active_capture_session is None:
+            return
+        card, btn, le, idx = _active_capture_session
+        if card == self:
+            _active_capture_session = None
+            try:
+                if not is_cancelled and slot_text:
+                    le.setText(slot_text)
+                    self.on_text_changed(idx, slot_text)
+                self.reset_btn(btn)
+            except RuntimeError:
+                pass
+
+
+class TabTimerSettings(QWidget):
+    settings_changed = pyqtSignal()
+    timer_name_changed = pyqtSignal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.card_map = {}
+        self.init_ui()
+        activity_engine.tick.connect(self.on_activity_tick)
+        capture_bridge.window_captured.connect(self.on_global_window_captured)
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.sub_tabs = QTabWidget()
+        self.sub_tabs.setObjectName("subTabWidget")
+
+        # 1. 타이머 목록 탭
+        self.sub_page_timers = QWidget()
+        l_t = QVBoxLayout(self.sub_page_timers)
+        l_t.setContentsMargins(4, 14, 4, 12)
+        l_t.setSpacing(10)
+
+        top_bar_t = QHBoxLayout()
+        self.snap_cb = QCheckBox(I18n.tr("magnetic_snap"))
+        self.snap_cb.setChecked(config_mgr.config.get("settings", {}).get("magnetic_snap", True))
+        self.snap_cb.toggled.connect(self.on_snap_toggled)
+        self.btn_add_timer = QPushButton(I18n.tr("add_timer"))
+        self.btn_add_timer.setProperty("actionType", "primary")
+        self.btn_add_timer.clicked.connect(self.add_timer)
+        top_bar_t.addWidget(self.snap_cb)
+        top_bar_t.addStretch()
+        top_bar_t.addWidget(self.btn_add_timer)
+        l_t.addLayout(top_bar_t)
+
+        div_t = QLabel()
+        div_t.setObjectName("accentDivider")
+        div_t.setFixedHeight(1)
+        l_t.addWidget(div_t)
+
+        scroll_t = QScrollArea()
+        scroll_t.setWidgetResizable(True)
+        scroll_t.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.t_content_widget = QWidget()
+        self.timer_list_layout = QVBoxLayout(self.t_content_widget)
+        self.timer_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.timer_list_layout.setSpacing(4)
+        self.timer_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_t.setWidget(self.t_content_widget)
+        l_t.addWidget(scroll_t)
+
+        # 2. 탭 그룹 탭
+        self.sub_page_groups = QWidget()
+        l_g = QVBoxLayout(self.sub_page_groups)
+        l_g.setContentsMargins(4, 14, 4, 12)
+        l_g.setSpacing(10)
+
+        top_bar_g = QHBoxLayout()
+        top_bar_g.addStretch()
+        self.btn_create_g = QPushButton(I18n.tr("create_group"))
+        self.btn_create_g.setProperty("actionType", "primary")
+        self.btn_create_g.clicked.connect(self.create_group)
+        top_bar_g.addWidget(self.btn_create_g)
+        l_g.addLayout(top_bar_g)
+
+        div_g = QLabel()
+        div_g.setObjectName("accentDivider")
+        div_g.setFixedHeight(1)
+        l_g.addWidget(div_g)
+
+        scroll_g = QScrollArea()
+        scroll_g.setWidgetResizable(True)
+        scroll_g.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.g_content_widget = QWidget()
+        self.group_list_layout = QVBoxLayout(self.g_content_widget)
+        self.group_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.group_list_layout.setSpacing(6)
+        self.group_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_g.setWidget(self.g_content_widget)
+        l_g.addWidget(scroll_g)
+
+        self.sub_tabs.addTab(self.sub_page_timers, I18n.tr("subtab_timer_list"))
+        self.sub_tabs.addTab(self.sub_page_groups, I18n.tr("subtab_window_groups"))
+        main_layout.addWidget(self.sub_tabs)
+
+        self.refresh_timer_list()
+        self.refresh_group_list()
+
+    def on_global_window_captured(self, slot_text: str, is_cancelled: bool):
+        global _active_capture_session
+        if _active_capture_session is None:
+            return
+        card, btn, le, idx = _active_capture_session
+        _active_capture_session = None
+        try:
+            if not is_cancelled and slot_text:
+                le.setText(slot_text)
+                card.on_text_changed(idx, slot_text)
+            card.reset_btn(btn)
+        except RuntimeError:
+            pass
+
+    def on_activity_tick(self, updated_dict: dict):
+        for t_id, secs in updated_dict.items():
+            if t_id in self.card_map:
+                self.card_map[t_id].update_time_display(secs)
+
+    def on_snap_toggled(self, checked):
+        config_mgr.config.setdefault("settings", {})["magnetic_snap"] = checked
+        config_mgr.save_config()
+
+    def add_timer(self):
+        groups = list(config_mgr.config.get("groups", {}).keys())
+        first_g = groups[0] if groups else ""
+        new_t = {
+            "id": str(uuid.uuid4()),
+            "name": f"{I18n.tr('default_timer_name')} {len(config_mgr.config.get('timers', [])) + 1}",
+            "group": first_g,
+            "idle_timeout": 5,
+            "elapsed_seconds": 0,
+            "x": 200, "y": 300,
+            "paused": False
+        }
+        config_mgr.config.setdefault("timers", []).append(new_t)
+        config_mgr.save_config()
+        self.refresh_timer_list()
+        self.settings_changed.emit()
+
+    def remove_timer(self, timer_data):
+        dlg = ConfirmDialog(I18n.tr("del_timer_title"), I18n.tr("del_timer_msg").format(name=timer_data.get('name')), is_danger=True, parent=self)
+        if dlg.exec() == ConfirmDialog.DialogCode.Accepted:
+            t_id = timer_data.get("id")
+            for p in config_mgr.config.get("pets", []):
+                if p.get("bound_timer_id") == t_id:
+                    p["bound_timer_id"] = ""
+            if timer_data in config_mgr.config.get("timers", []):
+                config_mgr.config["timers"].remove(timer_data)
+            config_mgr.save_config()
+            self.refresh_timer_list()
+            self.settings_changed.emit()
+
+    def create_group(self):
+        groups = config_mgr.config.setdefault("groups", {})
+        idx = 1
+        name = f"{I18n.tr('default_group_name')} {idx}"
+        while name in groups:
+            idx += 1
+            name = f"{I18n.tr('default_group_name')} {idx}"
+
+        groups[name] = ["", "", ""]
+        config_mgr.save_config()
+        self.refresh_group_list()
+        self.sync_timer_cards_groups()
+        self.settings_changed.emit()
+
+    def rename_group(self, old_name, new_name):
+        groups = config_mgr.config.setdefault("groups", {})
+        if new_name in groups and new_name != old_name:
+            return
+        if old_name in groups:
+            wins = groups.pop(old_name)
+            groups[new_name] = wins
+            for t in config_mgr.config.get("timers", []):
+                if t.get("group") == old_name:
+                    t["group"] = new_name
+            config_mgr.save_config()
+            self.sync_timer_cards_groups()
+            self.settings_changed.emit()
+
+    def remove_group(self, name):
+        dlg = ConfirmDialog(I18n.tr("del_group"), I18n.tr("del_group_msg").format(name=name), is_danger=True, parent=self)
+        if dlg.exec() != ConfirmDialog.DialogCode.Accepted:
+            return
+        groups = config_mgr.config.get("groups", {})
+        if name in groups:
+            del groups[name]
+        fallback = list(groups.keys())[0] if groups else ""
+        for t in config_mgr.config.get("timers", []):
+            if t.get("group") == name:
+                t["group"] = fallback
+        config_mgr.save_config()
+        self.refresh_group_list()
+        self.sync_timer_cards_groups()
+        self.settings_changed.emit()
+
+    def sync_timer_cards_groups(self):
+        for card in self.card_map.values():
+            card.refresh_groups()
+
+    def refresh_timer_list(self):
+        self.card_map.clear()
+        while self.timer_list_layout.count():
+            item = self.timer_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for t in config_mgr.config.get("timers", []):
+            row = TimerRowWidget(t, self.remove_timer)
+            row.changed.connect(self.settings_changed.emit)
+            row.name_updated.connect(self.timer_name_changed.emit)
+            self.card_map[t.get("id")] = row
+            self.timer_list_layout.addWidget(row)
+        self.timer_list_layout.addStretch()
+
+    def refresh_group_list(self):
+        _clear_active_capture_session()
+        cancel_window_click_capture()
+        while self.group_list_layout.count():
+            item = self.group_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for g_name, wins in config_mgr.config.get("groups", {}).items():
+            sec = GroupSectionWidget(g_name, wins, self.remove_group, self.rename_group)
+            self.group_list_layout.addWidget(sec)
+        self.group_list_layout.addStretch()
+
+    def retranslate_ui(self):
+        self.sub_tabs.setTabText(0, I18n.tr("subtab_timer_list"))
+        self.sub_tabs.setTabText(1, I18n.tr("subtab_window_groups"))
+        self.snap_cb.setText(I18n.tr("magnetic_snap"))
+        self.btn_add_timer.setText(I18n.tr("add_timer"))
+        self.btn_create_g.setText(I18n.tr("create_group"))
+
+        for card in self.card_map.values():
+            card.retranslate_ui()
+        for i in range(self.group_list_layout.count()):
+            w = self.group_list_layout.itemAt(i).widget()
+            if isinstance(w, GroupSectionWidget):
+                w.retranslate_ui()
+
+    def apply_theme(self):
+        pass
+
+==================================================
+FILE: ui/theme.py
+==================================================
+
+# ui/theme.py
+
+COMMON_STYLE = """
+* {
+    font-family: "Pretendard", "Noto Sans CJK KR", "Noto Sans KR",
+                 "Apple SD Gothic Neo", "Malgun Gothic",
+                 "Hiragino Sans", "Yu Gothic UI", "Meiryo",
+                 "PingFang SC", "Microsoft YaHei",
+                 "PingFang TC", "Microsoft JhengHei",
+                 "Segoe UI", sans-serif;
+    outline: none;
+}
+
+QScrollArea { border: none; background: transparent; }
+QScrollBar:vertical {
+    background: transparent;
+    width: 4px;
+    margin: 0;
+    border-radius: 2px;
+}
+QScrollBar::handle:vertical { background: #2563EB; border-radius: 2px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+"""
+
+LIGHT_THEME = COMMON_STYLE + """
+QWidget#settingsRoot {
+    background-color: #FFFFFF;
+    border: none;
+    border-radius: 10px;
+}
+QWidget { background-color: transparent; color: #111827; font-size: 13px; }
+
+/* 상단 타이틀바 */
+QWidget#titleBar {
+    background-color: transparent;
+    border-bottom: 1px solid #0F4C81;
+}
+QLabel#titleLabel { font-size: 13px; font-weight: 600; color: #111827; }
+QPushButton#titleBtn {
+    background: transparent; border: none;
+    color: #111827; font-size: 12px; font-weight: 600;
+    text-align: center;
+}
+QPushButton#titleBtn:hover { color: #0F4C81; }
+QPushButton#titleCloseBtn {
+    background: transparent; border: none;
+    color: #111827; font-size: 13px;
+    text-align: center;
+}
+QPushButton#titleCloseBtn:hover { color: #EF4444; }
+
+/* 구분선 */
+QFrame#accentDivider, QLabel#accentDivider {
+    background-color: #0F4C81;
+}
+QLabel#subDivider {
+    background-color: #E5E7EB;
+}
+
+/* 1단 메인 탭바 */
+QTabWidget#mainTabWidget::pane {
+    border: none;
+    border-top: 1px solid #0F4C81; /* 다크 테마는 #3B82F6 */
+    margin-top: -1px;
+    background: transparent;
+}
+QTabWidget#mainTabWidget > QTabBar {
+    background: transparent;
+}
+QTabWidget#mainTabWidget > QTabBar::tab {
+    background: transparent;
+    border: none;
+    padding: 12px 6px;
+    margin-right: 38px;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+/* 2단 서브 탭바 */
+QTabWidget#subTabWidget::pane {
+    border: none;
+    border-top: 1px solid #0F4C81; /* 다크 테마는 #3B82F6 */
+    margin-top: -1px;
+    background: transparent;
+}
+QTabWidget#subTabWidget > QTabBar {
+    background: transparent;
+}
+QTabWidget#subTabWidget > QTabBar::tab {
+    background: transparent;
+    border: none;
+    padding: 9px 6px;
+    margin-right: 36px;
+    font-size: 12px;
+}
+
+/* 체크박스 */
+QCheckBox {
+    spacing: 8px;
+    color: #111827;
+    font-size: 13px;
+    font-weight: 500;
+}
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid #9CA3AF;
+    background-color: #FFFFFF;
+}
+QCheckBox::indicator:checked {
+    background-color: #0F4C81;
+    border: 1px solid #0F4C81;
+}
+
+/* 플랫 컨트롤 */
+QLineEdit, QComboBox, QSpinBox {
+    background: transparent; border: none; border-bottom: 1px solid transparent;
+    padding: 2px 4px; color: #111827; font-size: 13px;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-bottom: 1px solid #0F4C81; }
+QComboBox::drop-down { border: none; width: 0px; }
+QSpinBox::up-button, QSpinBox::down-button { width: 0px; }
+
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF;
+    color: #111827;
+    border: 1px solid #0F4C81;
+    border-radius: 6px;
+    padding: 4px;
+    selection-background-color: #EFF6FF;
+    selection-color: #0F4C81;
+    outline: none;
+}
+
+QPushButton {
+    background: transparent; border: none;
+    color: #6B7280; font-weight: 500; font-size: 13px; text-align: left;
+}
+QPushButton:hover { color: #0F4C81; }
+QPushButton[actionType="danger"] { color: #E5989B; }
+QPushButton[actionType="danger"]:hover { color: #EF4444; }
+QPushButton[actionType="primary"] { color: #0F4C81; font-weight: 600; }
+QPushButton[actionType="primary"]:hover { color: #2563EB; }
+QPushButton[activeCapture="true"] { color: #2563EB; font-weight: bold; }
+"""
+
+DARK_THEME = COMMON_STYLE + """
+QWidget#settingsRoot {
+    background-color: #18181B;
+    border: none;
+    border-radius: 10px;
+}
+QWidget { background-color: transparent; color: #F4F4F5; font-size: 13px; }
+
+QWidget#titleBar {
+    background-color: transparent;
+    border-bottom: 1px solid #3B82F6;
+}
+QLabel#titleLabel { font-size: 13px; font-weight: 600; color: #F4F4F5; }
+QPushButton#titleBtn {
+    background: transparent; border: none;
+    color: #E4E4E7; font-size: 12px; font-weight: 600;
+    text-align: center;
+}
+QPushButton#titleBtn:hover { color: #60A5FA; }
+QPushButton#titleCloseBtn {
+    background: transparent; border: none;
+    color: #E4E4E7; font-size: 13px;
+    text-align: center;
+}
+QPushButton#titleCloseBtn:hover { color: #EF4444; }
+
+QFrame#accentDivider, QLabel#accentDivider {
+    background-color: #3B82F6;
+}
+QLabel#subDivider {
+    background-color: #27272A;
+}
+
+/* 1단 메인 탭바 */
+QTabWidget#mainTabWidget::pane {
+    border: none;
+    border-top: 1px solid #3B82F6; /* 다크 테마는 #3B82F6 */
+    margin-top: -1px;
+    background: transparent;
+}
+QTabWidget#mainTabWidget > QTabBar {
+    background: transparent;
+}
+QTabWidget#mainTabWidget > QTabBar::tab {
+    background: transparent;
+    border: none;
+    padding: 12px 6px;
+    margin-right: 38px;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+/* 2단 서브 탭바 */
+QTabWidget#subTabWidget::pane {
+    border: none;
+    border-top: 1px solid #3B82F6; /* 다크 테마는 #3B82F6 */
+    margin-top: -1px;
+    background: transparent;
+}
+QTabWidget#subTabWidget > QTabBar {
+    background: transparent;
+}
+QTabWidget#subTabWidget > QTabBar::tab {
+    background: transparent;
+    border: none;
+    padding: 9px 6px;
+    margin-right: 36px;
+    font-size: 12px;
+}
+
+QCheckBox {
+    spacing: 8px;
+    color: #F4F4F5;
+    font-size: 13px;
+    font-weight: 500;
+}
+QCheckBox::indicator {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid #52525B;
+    background-color: #27272A;
+}
+QCheckBox::indicator:checked {
+    background-color: #3B82F6;
+    border: 1px solid #3B82F6;
+}
+
+QLineEdit, QComboBox, QSpinBox {
+    background: transparent; border: none; border-bottom: 1px solid transparent;
+    padding: 2px 4px; color: #F4F4F5; font-size: 13px;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border-bottom: 1px solid #3B82F6; }
+QComboBox::drop-down { border: none; width: 0px; }
+QSpinBox::up-button, QSpinBox::down-button { width: 0px; }
+
+QComboBox QAbstractItemView {
+    background-color: #18181B;
+    color: #F4F4F5;
+    border: 1px solid #3B82F6;
+    border-radius: 6px;
+    padding: 4px;
+    selection-background-color: #27272A;
+    selection-color: #60A5FA;
+    outline: none;
+}
+
+QPushButton {
+    background: transparent; border: none;
+    color: #A1A1AA; font-weight: 500; font-size: 13px; text-align: left;
+}
+QPushButton:hover { color: #60A5FA; }
+QPushButton[actionType="danger"] { color: #F87171; }
+QPushButton[actionType="danger"]:hover { color: #EF4444; }
+QPushButton[actionType="primary"] { color: #60A5FA; font-weight: 600; }
+QPushButton[actionType="primary"]:hover { color: #93C5FD; }
+QPushButton[activeCapture="true"] { color: #60A5FA; font-weight: bold; }
+"""
+
+
+def get_popup_menu_style(is_dark: bool) -> str:
+    if is_dark:
+        bg = "#18181B"
+        border = "#3B82F6"
+        text = "#F4F4F5"
+        muted = "#71717A"
+        hover_bg = "#27272A"
+        hover_text = "#60A5FA"
+        sep = "#27272A"
+    else:
+        bg = "#FFFFFF"
+        border = "#0F4C81"
+        text = "#111827"
+        muted = "#9CA3AF"
+        hover_bg = "#EFF6FF"
+        hover_text = "#0F4C81"
+        sep = "#E5E7EB"
+
+    return f"""
+    QMenu {{
+        background-color: {bg};
+        border: 1px solid {border};
+        border-radius: 8px;
+        padding: 6px;
+        color: {text};
+        font-size: 12px;
+    }}
+    QMenu::item {{
+        background-color: transparent;
+        padding: 6px 28px 6px 14px;
+        border-radius: 4px;
+        margin: 1px 0px;
+    }}
+    QMenu::item:selected {{
+        background-color: {hover_bg};
+        color: {hover_text};
+    }}
+    QMenu::item:disabled {{
+        color: {muted};
+    }}
+    QMenu::right-arrow {{
+        width: 10px;
+        height: 10px;
+        right: 8px;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background: {sep};
+        margin: 5px 8px;
+    }}
+    QMenu::indicator {{
+        width: 12px;
+        height: 12px;
+        margin-left: 6px;
+    }}
+    """
+
+==================================================
+FILE: ui/timer_widget.py
+==================================================
+
+# ui/timer_widget.py
+import sys
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QApplication
+from PyQt6.QtCore import Qt, QPoint, QRectF, pyqtSignal
+from PyQt6.QtGui import QMouseEvent, QPainter, QColor
+from core.config_manager import config_mgr
+from core.snap_manager import SnapManager
+from core.i18n import I18n
+from core.activity_engine import activity_engine
+from ui.components import format_time, StyledMenu, ConfirmDialog
+
+
+class TimerWidget(QWidget):
+    SHADOW_MARGIN = 8
+    moved = pyqtSignal(str, int, int)
+    settings_requested = pyqtSignal()
+
+    def __init__(
+        self,
+        timer_data,
+        get_all_timers_callback,
+        get_bound_pet_callback,
+        open_main_settings_callback,
+        remove_callback=None,
+        quit_callback=None,
+    ):
+        super().__init__()
+        self.timer_data = timer_data
+        self.get_all_timers_callback = get_all_timers_callback
+        self.get_bound_pet_callback = get_bound_pet_callback
+        self.open_main_settings_callback = open_main_settings_callback
+        self.remove_callback = remove_callback
+        self.quit_callback = quit_callback
+        self.drag_position = QPoint()
+        self._applied_flags = None
+
+        self.setFixedWidth(140 + self.SHADOW_MARGIN * 2)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        if sys.platform == 'darwin':
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+
+        self.update_window_flags()
+        self.init_ui()
+        self.move(int(self.timer_data.get("x", 200)), int(self.timer_data.get("y", 300)))
+        I18n.language_changed.connect(self.retranslate_ui)
+
+    def update_window_flags(self):
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+        if config_mgr.config.get("settings", {}).get("tray_mode", False):
+            if sys.platform == 'win32':
+                flags |= Qt.WindowType.Tool
+            else:
+                flags |= Qt.WindowType.NoDropShadowWindowHint
+
+        if self._applied_flags != flags:
+            was_visible = self.isVisible()
+            self._applied_flags = flags
+            self.setWindowFlags(flags)
+            if was_visible:
+                self.show()
+
+    def init_ui(self):
+        m = self.SHADOW_MARGIN
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14 + m, 10 + m, 14 + m, 10 + m)
+        layout.setSpacing(4)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.label_name = QLabel(self.timer_data.get("name", I18n.tr("default_timer_name")))
+        self.label_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_name.setStyleSheet("background: transparent; font-size: 11px; font-weight: 600; color: #6B7280;")
+
+        self.label_time = QLabel(format_time(self.timer_data.get("elapsed_seconds", 0)))
+        self.label_time.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_time.setStyleSheet("background: transparent; font-size: 16px; font-weight: bold; font-family: monospace;")
+
+        layout.addWidget(self.label_name)
+        layout.addWidget(self.label_time)
+        self.apply_theme()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+        m = self.SHADOW_MARGIN
+        card_rect = QRectF(m, m, self.width() - m * 2, self.height() - m * 2)
+
+        # 옅은 다중 레이어 드롭 섀도우 (아래쪽으로 살짝 치우친 자연스러운 그림자)
+        for i in range(m, 0, -1):
+            alpha = int((1.0 - (i / (m + 1))) ** 2 * (26 if is_dark else 16))
+            painter.setBrush(QColor(0, 0, 0, alpha))
+            shadow_rect = card_rect.adjusted(-i * 0.6, -i * 0.4 + 1.5, i * 0.6, i * 0.8 + 1.5)
+            painter.drawRoundedRect(shadow_rect, 6 + i * 0.4, 6 + i * 0.4)
+
+        # 본체 카드
+        bg_color = QColor(24, 24, 27, 248) if is_dark else QColor(255, 255, 255, 248)
+        painter.setBrush(bg_color)
+        painter.drawRoundedRect(card_rect, 6, 6)
+
+    def apply_theme(self):
+        is_dark = config_mgr.config.get("settings", {}).get("dark_mode", False)
+        is_paused = self.timer_data.get("paused", False)
+        name_color = "#A1A1AA" if is_dark else "#6B7280"
+        time_color = "#71717A" if is_paused else ("#FFFFFF" if is_dark else "#000000")
+
+        self.label_name.setStyleSheet(f"background: transparent; font-size: 11px; font-weight: 600; color: {name_color};")
+        self.label_time.setStyleSheet(f"background: transparent; font-size: 16px; font-weight: bold; font-family: monospace; color: {time_color};")
+        self.update()
+
+    def update_time(self, seconds):
+        self.timer_data["elapsed_seconds"] = seconds
+        self.label_time.setText(format_time(seconds))
+
+    def update_metadata(self):
+        self.label_name.setText(self.timer_data.get("name", I18n.tr("default_timer_name")))
+        self.label_time.setText(format_time(self.timer_data.get("elapsed_seconds", 0)))
+        self.apply_theme()
+
+    def retranslate_ui(self):
+        if not self.timer_data.get("name"):
+            self.label_name.setText(I18n.tr("default_timer_name"))
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.show_context_menu(event.globalPosition().toPoint())
+            event.accept()
+
+    def show_context_menu(self, global_pos):
+        menu = StyledMenu(self)
+
+        is_paused = self.timer_data.get("paused", False)
+        pause_act = menu.addAction(I18n.tr("resume") if is_paused else I18n.tr("pause"))
+        pause_act.triggered.connect(self.toggle_pause)
+
+        reset_act = menu.addAction(I18n.tr("reset"))
+        reset_act.triggered.connect(self.reset_time)
+
+        delete_act = menu.addAction(I18n.tr("delete"))
+        delete_act.triggered.connect(self.delete_timer)
+
+        menu.addSeparator()
+
+        group_title = I18n.tr("group_label").rstrip(":").strip()
+        group_menu = menu.addStyledMenu(group_title)
+        groups = list(config_mgr.config.get("groups", {}).keys())
+        cur_group = self.timer_data.get("group", "")
+
+        if groups:
+            for g_name in groups:
+                act = group_menu.addAction(g_name)
+                act.setCheckable(True)
+                if g_name == cur_group:
+                    act.setChecked(True)
+                act.triggered.connect(lambda checked, name=g_name: self.change_group(name))
+        else:
+            empty_act = group_menu.addAction(I18n.tr("no_group_available"))
+            empty_act.setEnabled(False)
+
+        menu.addSeparator()
+
+        settings_act = menu.addAction(I18n.tr("open_settings"))
+        settings_act.triggered.connect(self.open_main_settings)
+
+        menu.addSeparator()
+
+        exit_act = menu.addAction(I18n.tr("tray_exit"))
+        exit_act.triggered.connect(self.quit_program)
+
+        menu.exec(global_pos)
+
+    def toggle_pause(self):
+        self.timer_data["paused"] = not self.timer_data.get("paused", False)
+        config_mgr.save_config()
+        self.update_metadata()
+
+    def reset_time(self):
+        dlg = ConfirmDialog(
+            I18n.tr("reset_confirm_title"),
+            I18n.tr("reset_confirm_msg"),
+            is_danger=False,
+            parent=None,
+        )
+        if dlg.exec() == ConfirmDialog.DialogCode.Accepted:
+            t_id = self.timer_data.get("id")
+            self.timer_data["elapsed_seconds"] = 0
+            config_mgr.save_config()
+            self.update_metadata()
+            activity_engine.tick.emit({t_id: 0})
+
+    def delete_timer(self):
+        timer_name = self.timer_data.get("name", I18n.tr("default_timer_name"))
+        dlg = ConfirmDialog(
+            I18n.tr("del_timer_title"),
+            I18n.tr("del_timer_msg").format(name=timer_name),
+            is_danger=True,
+            parent=None,
+        )
+        if dlg.exec() == ConfirmDialog.DialogCode.Accepted:
+            if self.remove_callback:
+                self.remove_callback(self.timer_data.get("id"))
+
+    def change_group(self, group_name: str):
+        self.timer_data["group"] = group_name
+        config_mgr.save_config()
+        self.update_metadata()
+
+    def open_main_settings(self):
+        if self.open_main_settings_callback:
+            self.open_main_settings_callback()
+
+    def quit_program(self):
+        if self.quit_callback:
+            self.quit_callback()
+        else:
+            QApplication.quit()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() == Qt.MouseButton.LeftButton:
+            raw_pos = event.globalPosition().toPoint() - self.drag_position
+            all_timers = self.get_all_timers_callback()
+            snapped_pos = SnapManager.calculate_snap(self, all_timers, raw_pos)
+            self.move(snapped_pos)
+
+            bound_pet = self.get_bound_pet_callback(self.timer_data.get("id"))
+            if bound_pet:
+                bound_pet.snap_to_timer(self)
+            self.moved.emit(self.timer_data.get("id"), snapped_pos.x(), snapped_pos.y())
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        self.timer_data["x"] = self.x()
+        self.timer_data["y"] = self.y()
+        config_mgr.save_config()
+        bound_pet = self.get_bound_pet_callback(self.timer_data.get("id"))
+        if bound_pet:
+            bound_pet.save_position()
+        event.accept()

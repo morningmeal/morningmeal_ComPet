@@ -2,15 +2,15 @@
 import os
 import shutil
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSlider,
-    QComboBox, QCheckBox, QFileDialog, QMessageBox, QGroupBox
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
+    QComboBox, QCheckBox, QFileDialog, QMessageBox, QScrollArea, QPushButton
 )
 from PyQt6.QtCore import Qt
 from core.config_manager import config_mgr, USER_SOUNDS_DIR
 from core.sound_manager import sound_mgr, scan_sound_files
 from core.i18n import I18n
 
-class SoundGroupWidget(QGroupBox):
+class SoundGroupWidget(QWidget):
     def __init__(self, title_key, prefix, parent=None):
         super().__init__(parent)
         self.title_key = title_key
@@ -21,46 +21,55 @@ class SoundGroupWidget(QGroupBox):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 18, 14, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 8, 0, 16)
+        layout.setSpacing(10)
+
+        top_h = QHBoxLayout()
+        self.title_lbl = QLabel()
+        self.title_lbl.setStyleSheet("font-weight: 700; font-size: 14px; color: #2563EB;")
+        top_h.addWidget(self.title_lbl)
+        top_h.addStretch()
 
         snd_conf = config_mgr.config.get("sound", {})
-        
-        # 사운드 활성화 체크박스
         self.enable_cb = QCheckBox(I18n.tr("sound_enable"))
         self.enable_cb.setChecked(snd_conf.get(f"{self.prefix}_sound_enabled", True))
         self.enable_cb.toggled.connect(self.on_enable_toggled)
+        top_h.addWidget(self.enable_cb)
+        layout.addLayout(top_h)
 
-        # 볼륨 조절 슬라이더
         vol_box = QHBoxLayout()
         self.vol_lbl = QLabel(I18n.tr("volume"))
-        self.vol_lbl.setFixedWidth(50)
+        self.vol_lbl.setFixedWidth(60)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 100)
         self.slider.setValue(snd_conf.get(f"{self.prefix}_volume", 50))
         self.slider.valueChanged.connect(self.on_vol_changed)
         self.vol_val = QLabel(f"{self.slider.value()}%")
         self.vol_val.setFixedWidth(40)
-        self.vol_val.setStyleSheet("font-weight: bold; color: #2563EB;")
-        
         vol_box.addWidget(self.vol_lbl)
         vol_box.addWidget(self.slider, 1)
         vol_box.addWidget(self.vol_val)
+        layout.addLayout(vol_box)
 
-        # 사운드 선택 드롭다운
         snd_box = QHBoxLayout()
         self.pick_lbl = QLabel(I18n.tr("select_sound"))
-        self.pick_lbl.setFixedWidth(70)
+        self.pick_lbl.setFixedWidth(80)
         self.combo = QComboBox()
         self.combo.setFixedHeight(28)
         self.combo.currentIndexChanged.connect(self.on_sound_selected)
-        
+
+        self.btn_upload = QPushButton(I18n.tr("upload_sound"))
+        self.btn_upload.clicked.connect(self.upload_wav)
+
         snd_box.addWidget(self.pick_lbl)
         snd_box.addWidget(self.combo, 1)
-
-        layout.addWidget(self.enable_cb)
-        layout.addLayout(vol_box)
+        snd_box.addWidget(self.btn_upload)
         layout.addLayout(snd_box)
+
+        self.line = QLabel()
+        self.line.setFixedHeight(1)
+        self.line.setStyleSheet("background-color: #2563EB;")
+        layout.addWidget(self.line)
 
     def populate(self):
         self.combo.blockSignals(True)
@@ -74,7 +83,6 @@ class SoundGroupWidget(QGroupBox):
             if cur and (cur == path or os.path.basename(cur) == os.path.basename(path)):
                 sel_idx = idx
             idx += 1
-            
         self.combo.addItem(I18n.tr("upload_sound") + "...", "__upload__")
         self.combo.setCurrentIndex(sel_idx)
         self.combo.blockSignals(False)
@@ -99,7 +107,6 @@ class SoundGroupWidget(QGroupBox):
             config_mgr.config.setdefault("sound", {})[f"{self.prefix}_sound_path"] = data
             config_mgr.save_config()
             sound_mgr.load_sounds()
-            # 선택 즉시 시연 1회 재생
             if self.prefix == "key": sound_mgr.play_key()
             else: sound_mgr.play_click()
 
@@ -112,7 +119,6 @@ class SoundGroupWidget(QGroupBox):
             QMessageBox.warning(self, I18n.tr("error"), I18n.tr("upload_err"))
             self.populate()
             return
-
         dest = os.path.join(USER_SOUNDS_DIR, os.path.basename(path))
         try:
             if os.path.abspath(path) != os.path.abspath(dest):
@@ -128,24 +134,31 @@ class SoundGroupWidget(QGroupBox):
             self.populate()
 
     def retranslate_ui(self):
-        self.setTitle(I18n.tr(self.title_key))
+        self.title_lbl.setText(I18n.tr(self.title_key))
         self.enable_cb.setText(I18n.tr("sound_enable"))
         self.vol_lbl.setText(I18n.tr("volume"))
         self.pick_lbl.setText(I18n.tr("select_sound"))
+        self.btn_upload.setText(I18n.tr("upload_sound"))
         self.populate()
-
 
 class TabSoundSettings(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
-        # 서브 탭 없이 그룹 박스로 단일 페이지 구성
         self.key_grp = SoundGroupWidget("key_sound", "key")
         self.click_grp = SoundGroupWidget("click_sound", "click")
 
         layout.addWidget(self.key_grp)
         layout.addWidget(self.click_grp)
         layout.addStretch()
+        scroll.setWidget(content)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)

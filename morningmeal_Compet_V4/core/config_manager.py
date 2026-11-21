@@ -4,9 +4,9 @@ import sys
 import json
 import uuid
 import shutil
+import threading
 
 def get_bundle_dir():
-    """PyInstaller 번들 내부 또는 소스 코드 루트 경로 반환"""
     if getattr(sys, 'frozen', False):
         if hasattr(sys, '_MEIPASS'):
             return sys._MEIPASS
@@ -24,7 +24,6 @@ def get_bundle_dir():
 
 BUNDLE_DIR = get_bundle_dir()
 
-# 사용자 데이터 저장소: morningmeal_ComPet
 if sys.platform == 'darwin':
     USER_DATA_DIR = os.path.expanduser("~/Library/Application Support/morningmeal_ComPet")
 else:
@@ -76,6 +75,7 @@ DEFAULT_CONFIG = {
 
 class ConfigManager:
     def __init__(self):
+        self._lock = threading.RLock()
         self._ensure_dirs()
         self.config = self.load_config()
 
@@ -102,65 +102,77 @@ class ConfigManager:
                 })
 
     def load_config(self):
-        data = json.loads(json.dumps(DEFAULT_CONFIG))
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                    for k, v in loaded.items():
-                        if isinstance(v, dict) and k in data:
-                            data[k].update(v)
-                        else:
-                            data[k] = v
-            except Exception as e:
-                print(f"[ConfigManager] Load error: {e}")
+        with self._lock:
+            data = json.loads(json.dumps(DEFAULT_CONFIG))
+            if os.path.exists(CONFIG_PATH):
+                try:
+                    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                        for k, v in loaded.items():
+                            if isinstance(v, dict) and k in data:
+                                data[k].update(v)
+                            else:
+                                data[k] = v
+                except Exception as e:
+                    print(f"[ConfigManager] Load error: {e}")
 
-        # 기본 펫 인스턴스가 없을 경우 1마리 기본 생성
-        if not data.get("pets"):
-            first_timer_id = data["timers"][0]["id"] if data.get("timers") else ""
-            data["pets"].append({
-                "id": str(uuid.uuid4()),
-                "skin": "default",
-                "scale": 1.0,
-                "x": 200,
-                "y": 200,
-                "bound_timer_id": first_timer_id
-            })
-        return data
+            if not data.get("pets"):
+                first_timer_id = data["timers"][0]["id"] if data.get("timers") else ""
+                data["pets"].append({
+                    "id": str(uuid.uuid4()),
+                    "skin": "default",
+                    "scale": 1.0,
+                    "x": 200,
+                    "y": 200,
+                    "bound_timer_id": first_timer_id
+                })
+            return data
 
     def save_config(self):
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"[ConfigManager] Save error: {e}")
+        with self._lock:
+            tmp_path = CONFIG_PATH + ".tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, CONFIG_PATH)
+            except Exception as e:
+                print(f"[ConfigManager] Save error: {e}")
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
 
     def get_skin_config(self, skin_name):
-        path = os.path.join(SKINS_DIR, skin_name, "config.json")
-        conf = {
-            "name": skin_name,
-            "squash_depth": 0.20,
-            "enable_bounce": True,
-            "idle_image": "idle.png",
-            "tap_images": ["tap_left.png", "tap_right.png"],
-            "key_mappings": {}
-        }
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    conf.update(json.load(f))
-            except Exception:
-                pass
-        return conf
+        with self._lock:
+            path = os.path.join(SKINS_DIR, skin_name, "config.json")
+            conf = {
+                "name": skin_name,
+                "squash_depth": 0.20,
+                "enable_bounce": True,
+                "idle_image": "idle.png",
+                "tap_images": ["tap_left.png", "tap_right.png"],
+                "key_mappings": {}
+            }
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        conf.update(json.load(f))
+                except Exception:
+                    pass
+            return conf
 
     def save_skin_config(self, skin_name, data):
-        target_dir = os.path.join(SKINS_DIR, skin_name)
-        os.makedirs(target_dir, exist_ok=True)
-        path = os.path.join(target_dir, "config.json")
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"[ConfigManager] Skin config save error for {skin_name}: {e}")
+        with self._lock:
+            target_dir = os.path.join(SKINS_DIR, skin_name)
+            os.makedirs(target_dir, exist_ok=True)
+            path = os.path.join(target_dir, "config.json")
+            tmp_path = path + ".tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, path)
+            except Exception as e:
+                print(f"[ConfigManager] Skin config save error for {skin_name}: {e}")
 
 config_mgr = ConfigManager()

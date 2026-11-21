@@ -8,9 +8,9 @@ from pynput import keyboard, mouse
 from PyQt6.QtCore import QObject, pyqtSignal
 
 class InputEngineBridge(QObject):
-    # (payload_str, is_mouse_click)
-    # payload 예시: "a", "ctrl+c", "mouse_left"
     input_occurred = pyqtSignal(str, bool)
+    mouse_clicked_global = pyqtSignal(str, int, int)  # 버튼명, x, y 좌표 포함
+    escape_pressed_global = pyqtSignal()
 
 input_bridge = InputEngineBridge()
 
@@ -25,32 +25,35 @@ SHIFT_MAP = {
     ';': ':', "'": '"', ',': '<', '.': '>', '/': '?', '`': '~'
 }
 
-def get_last_activity_time():
-    global last_activity_time
+MAC_VK_MAP = {
+    0: 'a', 1: 's', 2: 'd', 3: 'f', 4: 'h', 5: 'g', 6: 'z', 7: 'x',
+    8: 'c', 9: 'v', 11: 'b', 12: 'q', 13: 'w', 14: 'e', 15: 'r',
+    16: 'y', 17: 't', 18: '1', 19: '2', 20: '3', 21: '4', 22: '6',
+    23: '5', 24: '=', 25: '9', 26: '7', 27: '-', 28: '8', 29: '0',
+    30: ']', 31: 'o', 32: 'u', 33: '[', 34: 'i', 35: 'p', 37: 'l',
+    38: 'j', 39: "'", 40: 'k', 41: ';', 42: '\\', 43: ',', 44: '/',
+    45: 'n', 46: 'm', 47: '.', 49: 'space', 50: '`'
+}
+
+def get_last_activity_time() -> float:
     return last_activity_time
 
+def mark_activity():
+    global last_activity_time
+    last_activity_time = time.time()
+
 def check_mac_accessibility():
-    """
-    외부 pyobjc 라이브러리 없이 macOS 순수 ctypes 및 AppleScript로
-    손쉬운 사용(Accessibility) 권한을 확인하고 시스템 안내창을 띄움
-    """
     if sys.platform != 'darwin':
         return True
     try:
         app_services = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+        app_services.AXIsProcessTrusted.restype = ctypes.c_bool
         is_trusted = app_services.AXIsProcessTrusted()
-        
         if not is_trusted:
-            # 권한이 없을 경우 사용자에게 시스템 환경설정 손쉬운 사용 탭을 띄워줌
-            prompt_script = '''
-            tell application "System Preferences"
-                activate
-                set current pane to pane id "com.apple.preference.security"
-            end tell
-            '''
-            subprocess.Popen(["osascript", "-e", prompt_script], stderr=subprocess.DEVNULL)
-            print("[InputEngine] macOS Accessibility permission is required for global input detection.")
-            
+            subprocess.Popen(
+                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                stderr=subprocess.DEVNULL
+            )
         return bool(is_trusted)
     except Exception as e:
         print(f"[InputEngine] Accessibility check failed: {e}")
@@ -72,14 +75,24 @@ def normalize_key_token(token):
                 return str(vk - 96)
     return token_str.lower()
 
-def _mark_activity():
-    global last_activity_time
-    last_activity_time = time.time()
+def _extract_vk_fallback(key) -> str:
+    vk = getattr(key, 'vk', None)
+    if vk is None:
+        return ""
+    if sys.platform == 'darwin':
+        return MAC_VK_MAP.get(vk, "")
+    else:
+        if 48 <= vk <= 57:
+            return chr(vk)
+        elif 65 <= vk <= 90:
+            return chr(vk).lower()
+        elif 96 <= vk <= 105:
+            return str(vk - 96)
+    return ""
 
 def on_key_press(key):
     try:
-        _mark_activity()
-
+        mark_activity()
         if key in (keyboard.Key.shift, keyboard.Key.shift_r, keyboard.Key.shift_l):
             active_modifiers.add("shift")
             return
@@ -100,23 +113,28 @@ def on_key_press(key):
 
         char_val = getattr(key, 'char', None)
         base_name = None
+        
 
         if char_val is not None:
             raw_char = str(char_val)
             if len(raw_char) == 1 and ord(raw_char) < 32:
                 base_name = chr(ord(raw_char) + 96).lower()
-            else:
+            elif len(raw_char) == 1 and ord(raw_char) <= 126:
                 base_name = raw_char.lower()
+            else:
+                base_name = _extract_vk_fallback(key) or raw_char.lower()
         else:
-            raw_name = getattr(key, 'name', str(key))
-            clean_name = str(raw_name).replace("Key.", "").replace("key.", "")
-            base_name = normalize_key_token(clean_name)
+            vk_name = _extract_vk_fallback(key)
+            if vk_name:
+                base_name = vk_name
+            else:
+                raw_name = getattr(key, 'name', str(key))
+                clean_name = str(raw_name).replace("Key.", "").replace("key.", "")
+                base_name = normalize_key_token(clean_name)
 
         resolved_keys = []
-
         if char_val and char_val in "!@#$%^&*()_+{}|:\"<>?~":
             resolved_keys.append(char_val)
-
         if is_shift and base_name in SHIFT_MAP:
             resolved_keys.append(SHIFT_MAP[base_name])
 
@@ -129,13 +147,14 @@ def on_key_press(key):
 
         if mods and base_name:
             resolved_keys.append("+".join(mods) + "+" + base_name)
-
         if base_name:
             resolved_keys.append(base_name)
 
+        if base_name == "esc":
+            input_bridge.escape_pressed_global.emit()
+
         payload = "|".join(dict.fromkeys(resolved_keys))
         input_bridge.input_occurred.emit(payload, False)
-
     except Exception as e:
         print(f"[InputEngine] Key error: {e}")
 
@@ -153,28 +172,30 @@ def on_key_release(key):
         pass
 
 def on_mouse_click(x, y, button, pressed):
+    if button == mouse.Button.left:
+        b_name = "mouse_left"
+    elif button == mouse.Button.right:
+        b_name = "mouse_right"
+    elif button == mouse.Button.middle:
+        b_name = "mouse_middle"
+    else:
+        b_name = "mouse_click"
+
     if pressed:
-        _mark_activity()
-        if button == mouse.Button.left:
-            b_name = "mouse_left"
-        elif button == mouse.Button.right:
-            b_name = "mouse_right"
-        elif button == mouse.Button.middle:
-            b_name = "mouse_middle"
-        else:
-            b_name = "mouse_click"
+        mark_activity()
         input_bridge.input_occurred.emit(b_name, True)
+    else:
+        input_bridge.mouse_clicked_global.emit(b_name, int(x), int(y))
 
 def on_mouse_move(x, y):
     global _last_move_throttle_time
     now = time.time()
-    # 0.1초 이내의 미세 움직임은 스로틀링하여 이벤트 과부하 방지
-    if now - _last_move_throttle_time > 0.1:
+    if now - _last_move_throttle_time > 0.15:
         _last_move_throttle_time = now
-        _mark_activity()
+        mark_activity()
 
 def on_mouse_scroll(x, y, dx, dy):
-    _mark_activity()
+    mark_activity()
 
 def start_input_engine():
     if sys.platform == 'darwin':
@@ -182,24 +203,14 @@ def start_input_engine():
 
     def listener_thread():
         if sys.platform == 'darwin':
-            # macOS에서 CGS 루프 초기화 안정성을 위한 짧은 대기
             time.sleep(0.3)
-
-        k_listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
-        # on_press=None 인자 제거하여 pynput 버전 호환성 확보
-        m_listener = mouse.Listener(
-            on_click=on_mouse_click,
-            on_move=on_mouse_move,
-            on_scroll=on_mouse_scroll
-        )
-
-        k_listener.daemon = True
-        m_listener.daemon = True
-        k_listener.start()
-        m_listener.start()
-
-        k_listener.join()
-        m_listener.join()
+        try:
+            with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as k_listener, \
+                 mouse.Listener(on_click=on_mouse_click, on_move=on_mouse_move, on_scroll=on_mouse_scroll) as m_listener:
+                k_listener.join()
+                m_listener.join()
+        except Exception as e:
+            print(f"[InputEngine] Listener error: {e}")
 
     t = threading.Thread(target=listener_thread, daemon=True)
     t.start()
