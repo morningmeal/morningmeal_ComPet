@@ -6,9 +6,6 @@
 
 ## 🇰🇷 한국어
 
-**morningmeal ComPet**은 작업 생산성을 높여주는 데스크톱 애플리케이션입니다.  
-사용자의 작업 창 포커스에 반응하여 자동으로 시간을 측정하는 **워크 타이머**와, 타건 및 클릭에 실시간으로 반응하며 타이머에 자석처럼 도킹되는 **타이핑 펫**을 제공합니다.
-
 ### ✨ 주요 기능
 - **워크 타이머**: 활성 창(프로그램 제목/프로세스)을 인식하여 실제 작업 시간에만 누적 카운트
 - **타이핑 펫**: 키보드/마우스 입력에 반응하며, 원하는 타이머 상단에 드롭 시 자동 연결
@@ -39,14 +36,11 @@
      ```
 3. **필수 권한 설정**:
    - 백그라운드 키보드/마우스 입력 감지를 위해 권한이 필요합니다.
-   - **[시스템 설정] -> [개인정보 보호 및 보안] -> [손쉬운 사용]**에서 `morningmealCompet`를 허용해 주세요.
+   - **[시스템 설정] -> [개인정보 보호 및 보안] -> [손쉬운 사용]** (필요 시 **[입력 모니터링]**)에서 `morningmealCompet`을 허용해 주세요.
 
 ---
 
 ## 🇺🇸 English
-
-**morningmeal ComPet** is a desktop application designed to boost productivity.  
-It features a **Work Timer** that automatically tracks time based on your active window focus, and an interactive **Typing Pet** that responds to keystrokes and mouse clicks in real time while magnetically docking to your timers.
 
 ### ✨ Key Features
 - **Work Timer**: Recognizes active windows (titles/processes) and only counts actual focused work time
@@ -77,15 +71,12 @@ It features a **Work Timer** that automatically tracks time based on your active
      xattr -cr /Applications/morningmealCompet.app
      ```
 3. **Required Permissions**:
-   - Accessibility permission is required to detect background keyboard and mouse input.
+   - Accessibility and Input Monitoring permissions are required to detect background keyboard and mouse input.
    - Go to **[System Settings] -> [Privacy & Security] -> [Accessibility]** and allow `morningmealCompet`.
 
 ---
 
 ## 🇯🇵 日本語
-
-**morningmeal ComPet** は、作業効率を高めるデスクトップアプリケーションです。  
-アクティブウィンドウのフォーカスを検知して自動で作業時間を計測する**ワークタイマー**と、打鍵やクリックにリアルタイムで反応しタイマー上部に吸着する**タイピングペット**を提供します。
 
 ### ✨ 主な機能
 - **ワークタイマー**: アクティブウィンドウ（タイトル/プロセス）を認識し、実稼働時間のみをカウント
@@ -123,9 +114,6 @@ It features a **Work Timer** that automatically tracks time based on your active
 
 ## 🇨🇳 简体中文
 
-**morningmeal ComPet** 是一款旨在提升工作效率的桌面应用程序。  
-提供可根据当前焦点窗口自动跟踪时间的**工作计时器**，以及对按键与点击即时响应并可磁吸附在计时器上的**打字宠物**。
-
 ### ✨ 核心功能
 - **工作计时器**: 智能识别活动窗口（标题/进程），仅在实际工作时累计时间
 - **打字宠物**: 实时响应键盘与鼠标输入，拖拽至计时器上方即可自动连接
@@ -161,9 +149,6 @@ It features a **Work Timer** that automatically tracks time based on your active
 ---
 
 ## 🇹🇼 繁體中文
-
-**morningmeal ComPet** 是一款提升工作生產力的桌面應用程式。  
-提供依據當前活動視窗焦點自動追蹤時間的**工作計時器**，以及即時響應按鍵與點擊、並可磁吸附於計時器上的**打字寵物**。
 
 ### ✨ 核心功能
 - **工作計時器**: 自動識別焦點視窗（標題/處理程序），精準累計實際工作時間
