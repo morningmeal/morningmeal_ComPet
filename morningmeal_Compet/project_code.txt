@@ -1234,7 +1234,9 @@ FILE: core/window_tracker.py
 import sys
 import os
 import subprocess
-from typing import Optional
+
+_PID_NAME_CACHE: dict[int, str] = {}
+
 
 class WindowInfo:
     def __init__(self, title="", app_name="", window_id=0, pid=0):
@@ -1255,37 +1257,165 @@ class WindowInfo:
             return f"[{clean_app}]"
         return clean_title
 
-def get_window_at_point(x: int, y: int) -> WindowInfo:
-    """마우스 커서 좌표 (x, y) 아래에 있는 최상위 윈도우 정보를 반환 (게임/보안창 보완용)"""
+
+def _get_win32_process_name(kernel32, pid_val: int) -> str:
+    if not pid_val:
+        return ""
+    if pid_val in _PID_NAME_CACHE:
+        return _PID_NAME_CACHE[pid_val]
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    exe_name = ""
+    for access in (0x1000, 0x0400):  # PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_QUERY_INFORMATION
+        h_process = kernel32.OpenProcess(access, False, pid_val)
+        if h_process:
+            try:
+                name_buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                if kernel32.QueryFullProcessImageNameW(h_process, 0, name_buf, ctypes.byref(size)):
+                    exe_name = os.path.basename(name_buf.value)
+                    break
+            finally:
+                kernel32.CloseHandle(h_process)
+
+    # 관리자 권한 프로세스 등 OpenProcess가 차단된 경우 tasklist 폴백
+    if not exe_name:
+        try:
+            out = subprocess.check_output(
+                ["tasklist", "/FI", f"PID eq {pid_val}", "/FO", "CSV", "/NH"],
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+                timeout=0.3
+            ).decode("utf-8", errors="ignore").strip()
+            if out and out.startswith('"'):
+                parsed = out.split('","')[0].strip('"')
+                if parsed.lower().endswith(".exe"):
+                    exe_name = parsed
+        except Exception:
+            pass
+
+    if exe_name:
+        if len(_PID_NAME_CACHE) > 512:
+            _PID_NAME_CACHE.clear()
+        _PID_NAME_CACHE[pid_val] = exe_name
+
+    return exe_name
+
+
+def _inspect_win32_hwnd(hwnd) -> WindowInfo:
+    if not hwnd:
+        return WindowInfo()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+
+        # GA_ROOTOWNER(3)로 팝업/오버레이의 소유자 본체 창을 우선 추적, 없으면 GA_ROOT(2) 사용
+        root_owner = user32.GetAncestor(hwnd, 3)
+        if root_owner:
+            hwnd = root_owner
+        else:
+            root_hwnd = user32.GetAncestor(hwnd, 2)
+            if root_hwnd:
+                hwnd = root_hwnd
+
+        win_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+        pid_val = int(win_pid.value)
+
+        length = user32.GetWindowTextLengthW(hwnd)
+        title = ""
+        if length > 0:
+            buff = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buff, length + 1)
+            title = buff.value.strip()
+
+        app_name = _get_win32_process_name(kernel32, pid_val)
+
+        if app_name.lower() == "applicationframehost.exe":
+            child_pids = []
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+            def enum_child_proc(c_hwnd, lparam):
+                c_pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(c_hwnd, ctypes.byref(c_pid))
+                if c_pid.value and int(c_pid.value) != pid_val:
+                    child_pids.append(int(c_pid.value))
+                    return False
+                return True
+
+            user32.EnumChildWindows(hwnd, WNDENUMPROC(enum_child_proc), 0)
+            if child_pids:
+                real_app = _get_win32_process_name(kernel32, child_pids[0])
+                if real_app:
+                    app_name = real_app
+                    pid_val = child_pids[0]
+
+        return WindowInfo(title=title, app_name=app_name, window_id=int(hwnd), pid=pid_val)
+    except Exception:
+        return WindowInfo()
+
+
+def get_window_at_cursor() -> WindowInfo:
+    """HiDPI 배율 영향을 받지 않도록 OS 물리 커서 좌표를 직접 읽어 창 정보를 반환"""
     if sys.platform == 'win32':
         try:
             import ctypes
             from ctypes import wintypes
             user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
+            user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+            user32.GetCursorPos.restype = wintypes.BOOL
+            user32.WindowFromPoint.argtypes = [wintypes.POINT]
+            user32.WindowFromPoint.restype = wintypes.HWND
 
-            pt = wintypes.POINT(int(x), int(y))
-            hwnd = user32.WindowFromPoint(pt)
-            if not hwnd:
-                return WindowInfo()
+            pt = wintypes.POINT()
+            if user32.GetCursorPos(ctypes.byref(pt)):
+                hwnd = user32.WindowFromPoint(pt)
+                return _inspect_win32_hwnd(hwnd)
+        except Exception:
+            return WindowInfo()
+    elif sys.platform == 'darwin':
+        try:
+            from PyQt6.QtGui import QCursor
+            pos = QCursor.pos()
+            return get_window_at_point(pos.x(), pos.y())
+        except Exception:
+            pass
+    return WindowInfo()
 
-            root_hwnd = user32.GetAncestor(hwnd, 2)  # GA_ROOT
-            if root_hwnd:
-                hwnd = root_hwnd
 
-            win_pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
-            pid_val = win_pid.value
-
-            length = user32.GetWindowTextLengthW(hwnd)
-            title = ""
-            if length > 0:
-                buff = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buff, length + 1)
-                title = buff.value.strip()
-
-            app_name = _get_win32_process_name(kernel32, pid_val)
-            return WindowInfo(title=title, app_name=app_name, window_id=hwnd, pid=pid_val)
+def get_window_at_point(x: int, y: int) -> WindowInfo:
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.WindowFromPoint.argtypes = [wintypes.POINT]
+            user32.WindowFromPoint.restype = wintypes.HWND
+            hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+            return _inspect_win32_hwnd(hwnd)
         except Exception:
             return WindowInfo()
 
@@ -1317,20 +1447,6 @@ def get_window_at_point(x: int, y: int) -> WindowInfo:
 
     return WindowInfo()
 
-def _get_win32_process_name(kernel32, pid_val: int) -> str:
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid_val)
-    if not h_process:
-        return ""
-    try:
-        import ctypes
-        name_buf = ctypes.create_unicode_buffer(1024)
-        size = ctypes.c_ulong(1024)
-        if kernel32.QueryFullProcessImageNameW(h_process, 0, name_buf, ctypes.byref(size)):
-            return os.path.basename(name_buf.value)
-    finally:
-        kernel32.CloseHandle(h_process)
-    return ""
 
 def _get_darwin_window_quartz() -> WindowInfo:
     try:
@@ -1352,6 +1468,7 @@ def _get_darwin_window_quartz() -> WindowInfo:
         options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
         win_list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) or []
 
+        fallback_wid = pid
         for w in win_list:
             if int(w.get("kCGWindowOwnerPID", 0)) != pid:
                 continue
@@ -1359,11 +1476,15 @@ def _get_darwin_window_quartz() -> WindowInfo:
                 continue
             w_title = str(w.get("kCGWindowName") or "").strip()
             w_id = int(w.get("kCGWindowNumber", 0)) or pid
-            return WindowInfo(title=w_title, app_name=app_name, window_id=w_id, pid=pid)
+            if w_title:
+                return WindowInfo(title=w_title, app_name=app_name, window_id=w_id, pid=pid)
+            if fallback_wid == pid:
+                fallback_wid = w_id
 
-        return WindowInfo(title="", app_name=app_name, window_id=pid, pid=pid)
+        return WindowInfo(title="", app_name=app_name, window_id=fallback_wid, pid=pid)
     except Exception:
         return WindowInfo()
+
 
 def _get_darwin_window_applescript() -> WindowInfo:
     try:
@@ -1416,52 +1537,16 @@ def _get_darwin_window_applescript() -> WindowInfo:
     except Exception:
         return WindowInfo()
 
+
 def get_active_window_info() -> WindowInfo:
     if sys.platform == 'win32':
         try:
             import ctypes
+            from ctypes import wintypes
             user32 = ctypes.windll.user32
-            kernel32 = ctypes.windll.kernel32
-
+            user32.GetForegroundWindow.restype = wintypes.HWND
             hwnd = user32.GetForegroundWindow()
-            if not hwnd:
-                return WindowInfo()
-
-            root_hwnd = user32.GetAncestor(hwnd, 2)
-            if root_hwnd:
-                hwnd = root_hwnd
-
-            win_pid = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
-            pid_val = win_pid.value
-
-            length = user32.GetWindowTextLengthW(hwnd)
-            title = ""
-            if length > 0:
-                buff = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buff, length + 1)
-                title = buff.value.strip()
-
-            app_name = _get_win32_process_name(kernel32, pid_val)
-
-            if app_name.lower() == "applicationframehost.exe":
-                child_pids = []
-                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-                def enum_child_proc(c_hwnd, lparam):
-                    c_pid = ctypes.c_ulong()
-                    user32.GetWindowThreadProcessId(c_hwnd, ctypes.byref(c_pid))
-                    if c_pid.value and c_pid.value != pid_val:
-                        child_pids.append(c_pid.value)
-                        return False
-                    return True
-                user32.EnumChildWindows(hwnd, WNDENUMPROC(enum_child_proc), 0)
-                if child_pids:
-                    real_app = _get_win32_process_name(kernel32, child_pids[0])
-                    if real_app:
-                        app_name = real_app
-                        pid_val = child_pids[0]
-
-            return WindowInfo(title=title, app_name=app_name, window_id=hwnd, pid=pid_val)
+            return _inspect_win32_hwnd(hwnd)
         except Exception:
             return WindowInfo()
 
@@ -1469,14 +1554,13 @@ def get_active_window_info() -> WindowInfo:
         info = _get_darwin_window_quartz()
         if info and info.title:
             return info
-        # Quartz에서 창 제목이 비어 있는 경우(화면 기록 권한 미허용 등) AppleScript로 보조 조회
         as_info = _get_darwin_window_applescript()
         return as_info if as_info else info
 
     return WindowInfo()
 
+
 def is_left_mouse_pressed() -> bool:
-    """전역 훅 없이 현재 마우스 왼쪽 버튼이 물리적으로 눌려 있는지 확인"""
     if sys.platform == 'win32':
         try:
             import ctypes
@@ -1830,9 +1914,9 @@ from PyQt6.QtWidgets import (
     QFrame, QDialog, QMenu
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QMouseEvent, QKeyEvent, QFocusEvent, QCursor
+from PyQt6.QtGui import QMouseEvent, QKeyEvent, QFocusEvent
 from core.config_manager import config_mgr
-from core.window_tracker import get_active_window_info, get_window_at_point, is_left_mouse_pressed
+from core.window_tracker import get_active_window_info, get_window_at_cursor, is_left_mouse_pressed
 from core.i18n import I18n
 from ui.theme import get_popup_menu_style
 
@@ -1846,17 +1930,18 @@ def format_time(seconds):
 
 class WindowClickCaptureBridge(QObject):
     window_captured = pyqtSignal(str, bool)
+    window_hovered = pyqtSignal(str)  # 커서 아래 창 실시간 미리보기용
 
 
 capture_bridge = WindowClickCaptureBridge()
 _capture_poll_timer: QTimer | None = None
 _capture_elapsed_ms = 0
 _was_mouse_down = False
-_initial_window_id = 0
+_last_hovered_slot = ""
 
 
 def _finish_capture(slot_str: str, is_cancelled: bool):
-    global _capture_poll_timer, _capture_elapsed_ms, _was_mouse_down
+    global _capture_poll_timer, _capture_elapsed_ms, _was_mouse_down, _last_hovered_slot
     if _capture_poll_timer is None:
         return
 
@@ -1865,6 +1950,7 @@ def _finish_capture(slot_str: str, is_cancelled: bool):
     _capture_poll_timer = None
     _capture_elapsed_ms = 0
     _was_mouse_down = False
+    _last_hovered_slot = ""
 
     capture_bridge.window_captured.emit(slot_str, is_cancelled)
 
@@ -1882,49 +1968,53 @@ def _is_valid_target_window(win, my_pid: int) -> bool:
 
 
 def _poll_window_capture():
-    global _capture_elapsed_ms, _was_mouse_down
+    global _capture_elapsed_ms, _was_mouse_down, _last_hovered_slot
     _capture_elapsed_ms += 50
 
     if _capture_elapsed_ms >= 15000:
         _finish_capture("", True)
         return
 
+    # 버튼을 클릭한 직후 250ms 동안은 버튼 릴리즈 안정화 대기
+    if _capture_elapsed_ms < 250:
+        return
+
     my_pid = os.getpid()
 
-    # 1) 포그라운드 창이 다른 프로그램(VS Code, 게임 등)으로 바뀐 경우 즉시 감지
+    # 1) 커서 아래 창 실시간 감지 및 미리보기 시그널 발행
+    pt_win = get_window_at_cursor()
+    if _is_valid_target_window(pt_win, my_pid):
+        slot = pt_win.format_slot_string()
+        if slot != _last_hovered_slot:
+            _last_hovered_slot = slot
+            capture_bridge.window_hovered.emit(slot)
+
+    # 2) 포그라운드 창이 다른 프로그램(VS Code, 게임 등)으로 전환되면 즉시 확정
     fg_win = get_active_window_info()
-    if _is_valid_target_window(fg_win, my_pid) and fg_win.window_id != _initial_window_id:
+    if _is_valid_target_window(fg_win, my_pid):
         _finish_capture(fg_win.format_slot_string(), False)
         return
 
-    # 2) 마우스 왼쪽 버튼이 눌렸다 떼어지는 순간 커서 아래 창 직접 조회
+    # 3) 마우스 클릭(눌렀다 뗌) 시 커서 아래 창 확정
     is_down = is_left_mouse_pressed()
     if is_down:
         _was_mouse_down = True
     elif _was_mouse_down and not is_down:
         _was_mouse_down = False
-        fg_win = get_active_window_info()
-        if _is_valid_target_window(fg_win, my_pid):
-            _finish_capture(fg_win.format_slot_string(), False)
-            return
-
-        pos = QCursor.pos()
-        pt_win = get_window_at_point(pos.x(), pos.y())
         if _is_valid_target_window(pt_win, my_pid):
             _finish_capture(pt_win.format_slot_string(), False)
             return
 
 
 def start_window_click_capture():
-    global _capture_poll_timer, _capture_elapsed_ms, _was_mouse_down, _initial_window_id
+    global _capture_poll_timer, _capture_elapsed_ms, _was_mouse_down, _last_hovered_slot
     cancel_window_click_capture()
 
-    init_win = get_active_window_info()
-    _initial_window_id = init_win.window_id if init_win else 0
     _capture_elapsed_ms = 0
     _was_mouse_down = False
+    _last_hovered_slot = ""
 
-    _capture_poll_timer = QTimer()
+    _capture_poll_timer = QTimer(capture_bridge)
     _capture_poll_timer.setInterval(50)
     _capture_poll_timer.timeout.connect(_poll_window_capture)
     _capture_poll_timer.start()
@@ -3779,8 +3869,6 @@ class GroupSectionWidget(QWidget):
         self.line.setFixedHeight(1)
         layout.addWidget(self.line)
 
-        capture_bridge.window_captured.connect(self.on_window_captured)
-
     def on_group_rename_finished(self):
         new_name = self.name_edit.text().strip()
         if new_name and new_name != self.group_name:
@@ -3833,21 +3921,6 @@ class GroupSectionWidget(QWidget):
         btn.setProperty("activeCapture", False)
         btn.style().unpolish(btn)
         btn.style().polish(btn)
-
-    def on_window_captured(self, slot_text: str, is_cancelled: bool):
-        global _active_capture_session
-        if _active_capture_session is None:
-            return
-        card, btn, le, idx = _active_capture_session
-        if card == self:
-            _active_capture_session = None
-            try:
-                if not is_cancelled and slot_text:
-                    le.setText(slot_text)
-                    self.on_text_changed(idx, slot_text)
-                self.reset_btn(btn)
-            except RuntimeError:
-                pass
 
 
 class TabTimerSettings(QWidget):

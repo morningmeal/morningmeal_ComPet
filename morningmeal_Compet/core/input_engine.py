@@ -9,7 +9,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 class InputEngineBridge(QObject):
     input_occurred = pyqtSignal(str, bool)
-    mouse_clicked_global = pyqtSignal(str, int, int)  # 버튼명, x, y 좌표 포함
+    mouse_clicked_global = pyqtSignal(str, int, int)
     escape_pressed_global = pyqtSignal()
 
 input_bridge = InputEngineBridge()
@@ -17,6 +17,7 @@ input_bridge = InputEngineBridge()
 active_modifiers = set()
 last_activity_time = time.time()
 _last_move_throttle_time = 0.0
+_darwin_monitors = []
 
 SHIFT_MAP = {
     '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
@@ -32,7 +33,9 @@ MAC_VK_MAP = {
     23: '5', 24: '=', 25: '9', 26: '7', 27: '-', 28: '8', 29: '0',
     30: ']', 31: 'o', 32: 'u', 33: '[', 34: 'i', 35: 'p', 37: 'l',
     38: 'j', 39: "'", 40: 'k', 41: ';', 42: '\\', 43: ',', 44: '/',
-    45: 'n', 46: 'm', 47: '.', 49: 'space', 50: '`'
+    45: 'n', 46: 'm', 47: '.', 49: 'space', 50: '`', 53: 'esc',
+    36: 'enter', 48: 'tab', 51: 'backspace',
+    123: 'left', 124: 'right', 125: 'down', 126: 'up'
 }
 
 def get_last_activity_time() -> float:
@@ -90,6 +93,31 @@ def _extract_vk_fallback(key) -> str:
             return str(vk - 96)
     return ""
 
+def _emit_normalized_key(base_name: str, char_val: str | None, is_shift: bool, is_ctrl: bool, is_alt: bool, is_cmd: bool):
+    resolved_keys = []
+    if char_val and char_val in "!@#$%^&*()_+{}|:\"<>?~":
+        resolved_keys.append(char_val)
+    if is_shift and base_name in SHIFT_MAP:
+        resolved_keys.append(SHIFT_MAP[base_name])
+
+    mods = []
+    if is_cmd: mods.append("cmd")
+    if is_ctrl: mods.append("ctrl")
+    if is_alt: mods.append("alt")
+    if is_shift and not (is_shift and base_name in SHIFT_MAP):
+        mods.append("shift")
+
+    if mods and base_name:
+        resolved_keys.append("+".join(mods) + "+" + base_name)
+    if base_name:
+        resolved_keys.append(base_name)
+
+    if base_name == "esc":
+        input_bridge.escape_pressed_global.emit()
+
+    payload = "|".join(dict.fromkeys(resolved_keys))
+    input_bridge.input_occurred.emit(payload, False)
+
 def on_key_press(key):
     try:
         mark_activity()
@@ -113,7 +141,6 @@ def on_key_press(key):
 
         char_val = getattr(key, 'char', None)
         base_name = None
-        
 
         if char_val is not None:
             raw_char = str(char_val)
@@ -132,29 +159,7 @@ def on_key_press(key):
                 clean_name = str(raw_name).replace("Key.", "").replace("key.", "")
                 base_name = normalize_key_token(clean_name)
 
-        resolved_keys = []
-        if char_val and char_val in "!@#$%^&*()_+{}|:\"<>?~":
-            resolved_keys.append(char_val)
-        if is_shift and base_name in SHIFT_MAP:
-            resolved_keys.append(SHIFT_MAP[base_name])
-
-        mods = []
-        if is_cmd: mods.append("cmd")
-        if is_ctrl: mods.append("ctrl")
-        if is_alt: mods.append("alt")
-        if is_shift and not (is_shift and base_name in SHIFT_MAP):
-            mods.append("shift")
-
-        if mods and base_name:
-            resolved_keys.append("+".join(mods) + "+" + base_name)
-        if base_name:
-            resolved_keys.append(base_name)
-
-        if base_name == "esc":
-            input_bridge.escape_pressed_global.emit()
-
-        payload = "|".join(dict.fromkeys(resolved_keys))
-        input_bridge.input_occurred.emit(payload, False)
+        _emit_normalized_key(base_name, char_val, is_shift, is_ctrl, is_alt, is_cmd)
     except Exception as e:
         print(f"[InputEngine] Key error: {e}")
 
@@ -197,9 +202,108 @@ def on_mouse_move(x, y):
 def on_mouse_scroll(x, y, dx, dy):
     mark_activity()
 
+def _setup_darwin_global_monitors():
+    global _darwin_monitors
+    if sys.platform != 'darwin':
+        return
+    try:
+        from AppKit import (
+            NSEvent,
+            NSEventMaskKeyDown,
+            NSEventMaskLeftMouseDown,
+            NSEventMaskRightMouseDown,
+            NSEventMaskOtherMouseDown,
+            NSEventMaskLeftMouseUp,
+            NSEventMaskRightMouseUp,
+            NSEventMaskOtherMouseUp,
+            NSEventMaskMouseMoved,
+            NSEventMaskScrollWheel,
+            NSEventModifierFlagShift,
+            NSEventModifierFlagControl,
+            NSEventModifierFlagOption,
+            NSEventModifierFlagCommand,
+        )
+
+        def _handle_key_event(event):
+            try:
+                mark_activity()
+                flags = event.modifierFlags()
+                is_shift = bool(flags & NSEventModifierFlagShift)
+                is_ctrl = bool(flags & NSEventModifierFlagControl)
+                is_alt = bool(flags & NSEventModifierFlagOption)
+                is_cmd = bool(flags & NSEventModifierFlagCommand)
+
+                vk = int(event.keyCode())
+                chars = str(event.charactersIgnoringModifiers() or "")
+                char_val = chars[0] if chars else None
+
+                base_name = MAC_VK_MAP.get(vk)
+                if not base_name and char_val:
+                    if len(char_val) == 1 and ord(char_val) <= 126:
+                        base_name = char_val.lower()
+                    else:
+                        base_name = char_val.lower()
+
+                _emit_normalized_key(base_name or f"vk_{vk}", char_val, is_shift, is_ctrl, is_alt, is_cmd)
+            except Exception:
+                pass
+
+        def _handle_mouse_down(event, b_name: str):
+            try:
+                mark_activity()
+                input_bridge.input_occurred.emit(b_name, True)
+            except Exception:
+                pass
+
+        def _handle_mouse_up(event, b_name: str):
+            try:
+                loc = event.locationInWindow()
+                input_bridge.mouse_clicked_global.emit(b_name, int(loc.x), int(loc.y))
+            except Exception:
+                pass
+
+        def _handle_mouse_activity(event):
+            global _last_move_throttle_time
+            now = time.time()
+            if now - _last_move_throttle_time > 0.15:
+                _last_move_throttle_time = now
+                mark_activity()
+
+        key_mask = NSEventMaskKeyDown
+        down_mask = NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown
+        up_mask = NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp | NSEventMaskOtherMouseUp
+        move_mask = NSEventMaskMouseMoved | NSEventMaskScrollWheel
+
+        def _on_down(ev):
+            ev_type = ev.type()
+            if ev_type == NSEventMaskRightMouseDown:
+                _handle_mouse_down(ev, "mouse_right")
+            elif ev_type == NSEventMaskOtherMouseDown:
+                _handle_mouse_down(ev, "mouse_middle")
+            else:
+                _handle_mouse_down(ev, "mouse_left")
+
+        def _on_up(ev):
+            ev_type = ev.type()
+            if ev_type == NSEventMaskRightMouseUp:
+                _handle_mouse_up(ev, "mouse_right")
+            elif ev_type == NSEventMaskOtherMouseUp:
+                _handle_mouse_up(ev, "mouse_middle")
+            else:
+                _handle_mouse_up(ev, "mouse_left")
+
+        m1 = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(key_mask, _handle_key_event)
+        m2 = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(down_mask, _on_down)
+        m3 = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(up_mask, _on_up)
+        m4 = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(move_mask, _handle_mouse_activity)
+        _darwin_monitors = [m for m in (m1, m2, m3, m4) if m is not None]
+    except Exception as e:
+        print(f"[InputEngine] macOS NSEvent global monitor fallback error: {e}")
+
 def start_input_engine():
     if sys.platform == 'darwin':
         check_mac_accessibility()
+        _setup_darwin_global_monitors()
 
     def listener_thread():
         if sys.platform == 'darwin':

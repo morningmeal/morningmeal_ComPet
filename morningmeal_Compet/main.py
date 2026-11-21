@@ -29,6 +29,7 @@ from ui.components import StyledMenu
 class MorningmealComPetApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
+        self.app.setApplicationName("morningmealCompet")
         font_dir = os.path.join(BUNDLE_DIR, "assets", "fonts")
         if os.path.exists(font_dir):
             for fname in sorted(os.listdir(font_dir)):
